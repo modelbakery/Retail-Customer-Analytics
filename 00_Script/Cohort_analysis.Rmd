@@ -81,9 +81,4 @@ daily_spend_tbl <- daily_spend_invoice_tbl %>%
 ```
 
 
-```{r}
-
-```
-
-
 
