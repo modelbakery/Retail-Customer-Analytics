@@ -1,0 +1,89 @@
+---
+title: "Cohort_analysis"
+author: "Seung Hyun Sung"
+date: "1/20/2022"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    highlight: tango
+    number_sections: yes
+    theme: flatly
+    toc: yes
+    toc_depth: 3
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    eval = TRUE,
+    message = FALSE,
+    warning = FALSE,
+    dpi = 300,
+    fig.align = "center"
+    )
+```
+
+
+
+```{r}
+# Read Data 
+cleaned_retail_tbl <- read_rds(file = "00_data/data_wranggled/cleaned_retail_tbl.rds")
+
+cleaned_retail_tbl %>% glimpse()
+    select()
+```
+
+
+
+The transaction data captures every transactions including customer purchasing multiple products at different times. 
+
+```{r}
+
+# Purchase Transaction Table 
+trans_purhase_tbl <- cleaned_retail_tbl %>% 
+    filter(
+        quantity > 0,
+        unit_price > 0
+    ) %>%
+  select(
+    invoice_date, invoice_id, stock_code, customer_id, description,
+    quantity, unit_price, stock_value
+    ) %>% 
+  drop_na(customer_id)
+
+
+trans_purhase_tbl %>% 
+    filter(stock_code == 85048)
+
+
+# Daily Invoice Table 
+daily_spend_invoice_tbl <- trans_purhase_tbl %>% 
+  group_by(invoice_date, customer_id, invoice_id) %>% 
+  summarise(
+    .groups           = "drop",
+    n_items           = n(),
+    invoice_spend     = sum(stock_value)
+    ) 
+
+# Daily Customer Table 
+daily_spend_tbl <- daily_spend_invoice_tbl %>% 
+  group_by(invoice_date, customer_id) %>% 
+    summarise(
+    .groups           = "drop",
+    n_trans           = n(),
+    invoice_spend     = sum(invoice_spend)
+    ) 
+  
+```
+
+
+```{r}
+
+```
+
+
+

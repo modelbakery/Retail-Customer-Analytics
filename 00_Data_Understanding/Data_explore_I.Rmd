@@ -1,0 +1,823 @@
+---
+title: "Data Explore I"
+author: "Seung Hyun Sung"
+date: "1/20/2022"
+output:
+  html_document:
+    code_folding: show
+    df_print: paged
+    highlight: tango
+    number_sections: yes
+    theme: flatly
+    toc: yes
+    toc_depth: 3
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    eval = TRUE,
+    message = FALSE,
+    warning = FALSE,
+    dpi = 300,
+    fig.align = "center"
+    )
+```
+
+
+```{r libraries}
+library(timetk)
+library(recipes)
+library(DataExplorer)
+library(kableExtra)
+library(tidyverse)
+library(tidytext)
+library(readtext)
+library(tm)
+library(corpus)
+library(quanteda)
+library(wordcloud)
+library(skimr)
+library(glue)
+library(lubridate)
+library(kableExtra)
+library(rlang)
+library(scales)
+library(gridExtra)
+library(cowplot)
+library(tidyquant)
+
+```
+
+
+```{r}
+retail_tbl <- read_rds("00_Data/retail_data_tbl.rds")
+
+create_excel_datetime <- function(x){
+    (x * (60 * 60 * 24)) %>% as.POSIXct(origin = "1899-12-30", tz = "GMT")
+}
+```
+
+Pull pre-built functions:
+
+* word_clouding_generator
+    + generator_description_text_extraction
+    + generator_description_word_extraction
+    + generator_word_clouding_vector
+
+
+# Data Moderation 
+
+```{r}
+retail_explore_tbl <- retail_tbl %>% 
+    rename(invoice_id     = invoice,
+           unit_price     = price) %>% 
+    mutate(
+        row_id = sprintf("ROW%07d", 1:n()),
+        .before = 1
+    ) %>% 
+    mutate(invoice_dttm   = create_excel_datetime(invoice_date),
+           invoice_date   = as.Date(invoice_dttm),  
+           invoice_month  = format(invoice_dttm, "%B") %>% fct_reorder(invoice_dttm %>% format("%m") %>% as.numeric()),
+           invoice_dow    = format(invoice_dttm, "%A") %>% fct_reorder(invoice_dttm %>% format("%m") %>% as.numeric()),
+           invoice_dom    = format(invoice_dttm, "%d"),
+           invoice_hour   = format(invoice_dttm, "%H"),
+           invoice_minute = format(invoice_dttm, "%M"),
+           invoice_woy    = format(invoice_dttm, "%V"),
+           invoice_ym     = format(invoice_dttm, "%Y%m"),
+           invoice_ymts   = ceiling_date(invoice_date, "month")-1,
+           stock_code     = stock_code %>% str_to_upper(),
+           description    = str_replace_all(description, "[^[:alnum:]]", " "),
+           cancellation   = str_to_upper(str_detect(invoice_id, "^C")),
+           stock_value   = case_when(unit_price < 0 & quantity < 0 ~ unit_price*abs(quantity),
+                                    TRUE ~ unit_price*quantity),
+           unidentified_id = case_when(is.na(customer_id) ~ TRUE, 
+                                       TRUE ~ FALSE)) %>% 
+    group_by(invoice_ym) %>% 
+    mutate(invoice_month_prop = as.numeric(invoice_dom)/max(as.numeric(invoice_dom)),
+           country = as.factor(country),
+           neg_stock_value = ifelse(stock_value >= 0, FALSE, TRUE)) %>% 
+    ungroup() 
+
+ 
+```
+
+
+
+# Data Explore
+
+## Missing Customer ID and its multivariable contribution 
+
+Features with missingness: 
+
+* customer_id: 22.7%
+
+* description: 0.41%
+
+Severeness of missing values: 
+
+* customer_id:
+    + 0.17% of total income statement unidentified
+    
+* description:
+    + highly unique feature hence its degree of missingness can be negligible 
+
+```{r}
+missing_tbl <- retail_explore_tbl %>% 
+    map_df(~sum(is.na(.))/length(.)) %>% 
+    gather(key = variable, value = missing) %>% 
+    mutate(missing_pct = scales::percent(missing)) %>% 
+    filter(missing != 0) %>% 
+    arrange(desc(missing))
+
+missing_tbl %>% kbl() %>% kable_material()
+```
+
+
+causation: the unit_price feature consists financial statements (a.k.a debt), refunds, discounts, product damage along with the transactional sales.
+
+1.8% of total transcations traced are negative income statement (company's expenses + can be more) and from its stats
+
+* 96% are traceable | individual cost by cases is avg __58$__ 
+    + At 100% success, preventing such events ( __0.17%__ of cases) from this group can generate __4.8%__ of company's total revenue 
+    
+* 4% are not traceable (unidentified id) | individual cost by cases is avg __783$__
+    + the corresponding chance are unlikely but its risk are predominantly high
+    + At 100% success, preventing such events ( __0.07%__ of cases) can generate __2.6%__ of company's total revenue 
+
+
+```{r}
+summarise_income_unidentified <- function(data, ...){
+      data %>% 
+        group_by(...) %>% 
+        summarise(instances     = n(),
+                  total_income  = sum(abs(stock_value))) %>% ungroup() %>% 
+        mutate(instances_pct    = instances/sum(instances),
+               total_income_pct = total_income/sum(total_income))
+}
+
+income_unidentified_tbl <- retail_explore_tbl %>% 
+  summarise_income_unidentified(unidentified_id)
+
+income_unidentified_tbl %>% kbl() %>% kable_material()
+```
+
+```{r}
+instance_n_income_by_tbl <- retail_explore_tbl %>% 
+    
+    select(unidentified_id, neg_stock_value, stock_value) %>% 
+    group_by(unidentified_id, neg_stock_value) %>% 
+    summarise(instance    = n(),
+              total_income = sum(abs(stock_value))) %>% ungroup() %>% 
+    
+    mutate(total_instance_pct    = instance/sum(instance),
+           total_income_pct      = total_income/sum(total_income),
+           avg_income_per_cust = total_income/instance)
+
+instance_n_income_by_tbl %>% kbl() %>% kable_material()           
+```
+
+
+## Univariate Data Explore 
+
+```{r}
+retail_skim_list <- partition(skim(retail_explore_tbl))
+```
+
+### charater Var 
+
+```{r}
+charVar_value_count_tbl <- retail_explore_tbl %>% 
+    select(retail_skim_list$character$skim_variable) %>% 
+    map_df(~unique(.) %>% length()) %>% 
+    gather(
+        key = variable, 
+        value = level_count
+        ) %>% 
+    arrange(desc(level_count)) 
+
+charVar_value_count_tbl %>%
+    mutate(variable = as_factor(variable) %>% fct_reorder(level_count)) %>% 
+    ggplot(aes(variable, level_count)) +
+    geom_col(fill = palette_light()[1]) +
+    coord_flip() +
+    theme_tq()
+
+row_count <- retail_explore_tbl %>% nrow()
+```
+
+
+```{r}
+logical_vars <- retail_skim_list$logical$skim_variable %>% sort()
+
+for (plot_varname in logical_vars) {
+    cat("--\n")
+    cat(glue("{plot_varname}\n"))
+    
+    na_count <- retail_explore_tbl %>% pull(.data[[plot_varname]]) %>% are_na() %>% sum()
+    plot_title <- glue("Barplot of Counts for Variable: {plot_varname} ({na_count} missing values)")
+    
+    explore_plot <- ggplot(retail_explore_tbl) +
+        geom_bar(aes(x = .data[[plot_varname]], fill = .data[[plot_varname]])) +
+        xlab(str_to_title(plot_varname)) +
+        ylab("Count") +
+        scale_y_continuous(labels = label_comma()) +
+        ggtitle(plot_title) +
+        theme(axis.text.x = element_text(angle = 30, vjust = 0.5)) +
+        scale_fill_tq() +
+        theme_tq()
+    
+    plot(explore_plot)
+}
+```
+
+
+### Numeric Variable Explore
+
+```{r}
+numeric_vars <- retail_skim_list$numeric$skim_variable %>% sort()
+
+for (plot_varname in numeric_vars) {
+    cat("--\n")
+    cat(glue("{plot_varname}\n"))
+    
+    plot_var <- retail_explore_tbl %>% pull(.data[[plot_varname]])
+    na_count <- plot_var %>% are_na() %>% sum()
+    fill = palette_light()[1]
+    plot_var %>% summary()  %>% print()
+    plot_title <- glue("Histogram Plot for Variable: {plot_varname} ({na_count} missing values)")
+    
+    all_plot <- ggplot() +
+        geom_histogram(aes(x = plot_var, y = ..count..), fill = fill, bins = 30) +
+        geom_vline(xintercept = mean(plot_var, na.rm = TRUE),
+                   colour = palette_light()[2], size = 1.5) +
+        geom_vline(xintercept = median(plot_var, na.rm = TRUE),
+                   colour = palette_light()[3], size = 1.5) +
+        xlab(str_to_title(plot_varname)) +
+        ylab("Count") +
+        scale_x_continuous(labels = label_comma()) +
+        scale_y_continuous(labels = label_comma()) +
+        ggtitle(
+            plot_title,
+            subtitle = "red line: mean | green line: median"
+        ) +
+        theme_tq()
+    
+    pos_data_tbl <- retail_explore_tbl %>%
+        filter(.data[[plot_varname]] >= 0) %>%
+        mutate(var_val = abs(.data[[plot_varname]]))
+    
+    pos_log_plot <- ggplot(pos_data_tbl) +
+        geom_histogram(aes(x = var_val), fill = fill, bins = 30) +
+        xlab(plot_varname) +
+        ylab("Count") +
+        scale_x_log10(labels = label_comma()) +
+        scale_y_continuous(labels = label_comma()) +
+        ggtitle("Positive Values") +
+        theme_tq()
+    
+    neg_data_tbl <- retail_explore_tbl %>%
+        filter(.data[[plot_varname]] < 0) %>%
+        mutate(var_val = abs(.data[[plot_varname]]))
+    
+    neg_log_plot <- ggplot(neg_data_tbl) +
+        geom_histogram(aes(x = var_val), fill = fill, bins = 30) +
+        xlab(plot_varname) +
+        ylab("Count") +
+        scale_x_log10(labels = label_comma()) +
+        scale_y_continuous(labels = label_comma()) +
+        ggtitle("Negative Values") +
+        theme_tq()
+    
+    plot_grid(
+        all_plot,
+        NULL,
+        pos_log_plot,
+        neg_log_plot,
+        nrow = 2
+    ) %>%
+        print()
+}
+
+```
+
+
+### Categorical (factor) Variable Explore
+
+```{r}
+
+factor_vars <- retail_skim_list$factor$skim_variable %>% sort()
+
+for(plot_varname in factor_vars) {
+    cat("--\n")
+    cat(glue("{plot_varname}\n"))
+    
+    na_count   <- retail_explore_tbl %>% pull(.data[[plot_varname]]) %>% are_na() %>% sum()
+    plot_title <- glue("Barplot of Counts for Factor Variable: {plot_varname} ({na_count} missing values)")
+    
+    foo <- retail_explore_tbl %>% 
+        count(.data[[plot_varname]]) %>% 
+        ggplot() +
+        geom_bar(aes(x = .data[[plot_varname]], weight = n), fill = palette_light()[1]) +
+        xlab(str_to_title(plot_varname)) +
+        ylab("Count") +
+        scale_x_discrete(labels = ~ abbreviate(.x, minlength = 10)) +
+        scale_y_continuous(labels = label_comma()) +
+        ggtitle(plot_title) +
+        theme(axis.text.x = element_text(angle = 30, vjust = 0.5)) +
+        coord_flip() +
+        theme_tq()
+    
+    plot(foo)
+    
+    desc_plot_tbl <- retail_explore_tbl %>%
+        pull(.data[[plot_varname]]) %>%
+        fct_lump(n = 20) %>%
+        fct_count() %>%
+        mutate(f = fct_relabel(f, str_trunc, width = 15))
+    
+    desc_plot <- ggplot(desc_plot_tbl) +
+        geom_bar(aes(x = fct_reorder(f, -n), weight = n), fill = palette_light()[1]) +
+        xlab(plot_varname) +
+        ylab("Count") +
+        scale_x_discrete(labels = abbreviate) +
+        scale_y_continuous(labels = label_comma()) +
+        ggtitle(plot_title) +
+        theme(axis.text.x = element_text(angle = 30, vjust = 0.5)) +
+      theme_tq()
+    
+    desc_plot %>% print()
+    
+}
+```
+
+
+## Bivariable Data Explore
+
+### Facet Plot: logical variable VS faceted Categorical variable
+
+```{r}
+
+generatorVis_biVar_lgl_fct_factor <- function(data, 
+                                              variables = variables,
+                                              facet_varname = facet_varname,
+                                              dataexp_facet_count_max = 3,
+                                              free = NULL){
+    
+    variables <- logical_vars[!logical_vars %in% facet_varname] %>% sort()
+    
+    for (plot_varname in variables) {
+    cat("--\n")
+    cat(plot_varname)
+    plot_tbl <- data %>% filter(!are_na(.data[[plot_varname]]))
+    
+    list <- plot_tbl %>% 
+        group_by(.data[[facet_varname]]) %>% 
+        count(.data[[plot_varname]], sort = TRUE) %>% ungroup() %>% 
+        pull(.data[[facet_varname]]) 
+    
+    explore_plot <- plot_tbl %>% 
+        filter(.data[[facet_varname]] %in% list[which(duplicated(list))]) %>% 
+        ggplot() +
+        geom_bar(aes(x = .data[[plot_varname]], fill = .data[[plot_varname]])) +
+        facet_wrap(facet_varname, scales = free) +
+        xlab(str_to_title(plot_varname)) +
+        ylab("Count") +
+        scale_y_continuous(labels = label_comma()) +
+        ggtitle(glue("{facet_varname}-Faceted Histogram for Variable: {plot_varname}")) +
+        theme(axis.text.x = element_text(angle = 30, vjust = 0.5)) +
+        scale_fill_tq() +
+        theme_tq()
+    plot(explore_plot)
+    }
+}
+```
+
+
+```{r}
+retail_explore_tbl %>% 
+    generatorVis_biVar_lgl_fct_factor(logical_vars, 
+                                      facet_varname = "invoice_month")
+
+retail_explore_tbl %>% 
+    generatorVis_biVar_lgl_fct_factor(logical_vars, 
+                                      facet_varname = "invoice_dow",
+                                      free = "free")
+
+retail_explore_tbl %>% 
+    generatorVis_biVar_lgl_fct_factor(logical_vars, 
+                                      facet_varname = "country",
+                                      free = "free")
+
+```
+
+
+### Continous variable Facet Plot: by Categorical Variables
+
+```{r}
+
+for(facet_varname in factor_vars){
+  for(plot_varname in numeric_vars){
+  cat("--\n")
+  cat(plot_varname)
+  
+  plot_tbl <- retail_explore_tbl %>% filter(!are_na(.data[[plot_varname]]))
+  
+  explore_plot <- plot_tbl %>% ggplot() +
+    geom_histogram(aes(x = .data[[plot_varname]]), bins = 30, fill = palette_light()[1]) +
+    facet_wrap(facet_varname, scales = "free") +
+    labs(
+      x = plot_varname,
+      y = "Count"
+    ) +
+    scale_x_continuous(labels = label_comma()) +
+    scale_y_continuous(labels = label_comma()) +
+    ggtitle(glue("{facet_varname}-Faceted Histogram for Variable: {plot_varname}")) +
+    theme(axis.text.x = element_text(angle = 30, vjust = 0.5)) +
+    theme_tq()
+  
+  print(explore_plot)
+}
+}
+  
+```
+
+### Continous variable Facet Plot: by Logical Variables
+
+```{r}
+facet_varname <- c("unidentified_id", "neg_stock_value", "cancellation")
+for(plot_varname in numeric_vars){
+  cat("--\n")
+  cat(plot_varname)
+  
+  plot_tbl <- retail_explore_tbl %>% filter(!are_na(.data[[plot_varname]]))
+  
+  explore_plot <- plot_tbl %>% ggplot() +
+    geom_histogram(aes(x = .data[[plot_varname]]), bins = 30, fill = palette_light()[1]) +
+    facet_wrap(facet_varname, scales = "free") +
+    labs(
+      x = plot_varname,
+      y = "Count"
+    ) +
+    scale_x_continuous(labels = label_comma()) +
+    scale_y_continuous(labels = label_comma()) +
+    ggtitle(glue("{facet_varname}-Faceted Histogram for Variable: {plot_varname}")) +
+    theme(axis.text.x = element_text(angle = 30, vjust = 0.5)) +
+    theme_tq()
+  
+  print(explore_plot)
+}
+
+  
+```
+
+
+### Categorical variable Facet Plot:
+
+```{r}
+
+for(facet_varname in logical_vars){
+  for (plot_varname in factor_vars) {
+  cat("--\n")
+  cat(plot_varname)
+  
+  plot_tbl <- retail_explore_tbl %>%
+    filter(!are_na(.data[[plot_varname]])) 
+  
+  explore_plot <- ggplot(plot_tbl) +
+    geom_bar(aes(x = .data[[plot_varname]], fill = .data[[facet_varname]])) +
+    facet_wrap(facet_varname, scales = "free") +
+    xlab(plot_varname) +
+    ylab("Count") +
+    scale_x_discrete(labels = abbreviate) +
+    scale_y_continuous(labels = label_comma()) +
+    ggtitle(glue("{facet_varname}-Faceted Histogram for Variable: {plot_varname}")) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+          legend.position = "none") +
+    scale_fill_tq() 
+  
+  plot(explore_plot)
+}
+}
+
+```
+
+
+## Explore Aggregate Amount 
+
+The data set is aggregated transaction data hence we will inspect and re-aggregate in various form to explore customer purchasing behaviour. 
+
+
+### Item counts per transcation 
+
+```{r}
+plot_tbl <- retail_explore_tbl %>% 
+  filter(quantity > 0) %>% 
+  count(invoice_id, name = "n_items") 
+
+plot_tbl %>% 
+  ggplot() +
+  geom_histogram(aes(x = n_items), bins = 40, fill = palette_light()[1]) +
+  scale_x_log10(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  xlab("Number of Items") +
+  ylab("Transaction Count") +
+  ggtitle("Histogram of Item Counts per Transactions") +
+  theme_tq()
+```
+
+
+### Invoice transation amount 
+
+```{r}
+invoice_data_tbl <- retail_explore_tbl %>%
+  group_by(invoice_id) %>%
+  summarise(
+    .groups = "drop",
+    invoice_amount = sum(unit_price * quantity) %>% round(2)
+  )
+  
+invoice_mean   <- invoice_data_tbl %>% pull(invoice_amount) %>% mean()   %>% round(2)
+invoice_median <- invoice_data_tbl %>% pull(invoice_amount) %>% median() %>% round(2)
+
+ggplot(invoice_data_tbl) +
+  geom_histogram(aes(x = invoice_amount), bins = 50) +
+  geom_vline(aes(xintercept = invoice_mean),   colour = "black") +
+  geom_vline(aes(xintercept = invoice_median), colour = "red") +
+  xlab("Invoice Amount") +
+  ylab("Count") +
+  scale_x_log10(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  ggtitle(
+    label    = "Histogram Plot for Invoice Amount",
+    subtitle = glue("Mean is {invoice_mean}, Median is {invoice_median}")
+    )
+```
+
+
+### Customer-level amount  
+
+```{r}
+customer_data_tbl <- retail_explore_tbl %>%
+  group_by(customer_id) %>%
+  summarise(
+    .groups = "drop",
+    customer_spend = sum(unit_price * quantity) %>% round(2)
+  )
+  
+ggplot(customer_data_tbl) +
+  geom_histogram(aes(x = customer_spend), bins = 50) +
+  xlab("Customer Spend") +
+  ylab("Count") +
+  scale_x_log10(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  ggtitle("Histogram Plot for Customer Spend")
+```
+
+
+
+### Product items with highest cancellation 
+
+```{r}
+stock_codes_lookup_tbl <- retail_explore_tbl %>%
+  select(stock_code, description) %>%
+  distinct() %>%
+  arrange(stock_code, description) %>%
+  drop_na(description)
+
+stock_code_cancelled_tbl <- retail_explore_tbl %>%
+  filter(cancellation == TRUE) %>% 
+  mutate(description = str_to_lower(description)) %>% 
+  group_by(stock_code, description) %>%
+  summarise(count = n(),
+            cost  = sum(stock_value)) %>% 
+  arrange(desc(count)) %>% ungroup() %>% 
+  mutate(cost_text = scales::dollar(cost),
+         stock_code = str_glue("_{stock_code}_: {description}({cost_text})"),
+         stock_code = as_factor(stock_code) %>% fct_reorder(count)) %>% 
+  head(20)
+
+stock_code_cancelled_tbl %>% 
+  ggplot(aes(stock_code, count)) +
+  geom_col(fill = palette_light()[1]) +
+  coord_flip() +
+  theme_tq()
+
+```
+
+
+```{r}
+stock_code_summary_tbl <- retail_explore_tbl %>%
+  filter(cancellation == FALSE) %>% 
+  group_by(stock_code) %>%
+  summarise(
+    .groups = "drop",
+    
+    row_count = n(),
+    net_quantity = sum(quantity),
+    abs_quantity = abs(quantity) %>% sum(),
+    net_value    = sum(stock_value),
+    abs_value    = abs(quantity) %>% sum()
+    ) %>%
+  mutate(
+    sc_nchar = nchar(stock_code), .before = "row_count"
+    )
+
+stock_code_summary_tbl %>% head(20)
+```
+
+```{r}
+short_stock_codes_tbl <- retail_explore_tbl %>%
+  semi_join(stock_code_summary_tbl %>% filter(sc_nchar < 5), by = "stock_code")
+
+short_stock_codes_tbl %>% head(20)
+```
+
+
+## Stock Code Price Data 
+
+```{r}
+stock_price_counts_tbl <- retail_explore_tbl %>% 
+  group_by(stock_code) %>% 
+  summarise(
+    .groups     = "drop",
+    n_prices    = n(),
+    mean_price  = mean(unit_price),
+    min_price   = min(unit_price),
+    p25_price   = quantile(unit_price)[2],
+    p50_price   = quantile(unit_price)[3],
+    p75_price   = quantile(unit_price)[4],
+    max_price   = max(unit_price),
+    range_price = ((max_price - min_price)/ mean_price) %>% round(4)
+  ) 
+
+stock_price_counts_tbl %>% head(20)
+
+```
+
+
+```{r}
+stock_distinct_price_counts_tbl <- retail_explore_tbl %>% 
+  select(stock_code, unit_price) %>% 
+  distinct() %>% 
+  group_by(stock_code) %>% 
+  summarise(
+    .groups     = "drop",
+    n_prices    = n(),
+    mean_price  = mean(unit_price) %>% round(2),
+    min_price   = min(unit_price) %>% round(2),
+    p25_price   = quantile(unit_price)[2] %>% round(2),
+    p50_price   = quantile(unit_price)[3] %>% round(2),
+    p75_price   = quantile(unit_price)[4] %>% round(2),
+    max_price   = max(unit_price) %>% round(2),
+    range_price = ((max_price - min_price)/ mean_price) %>% round(2)
+  ) 
+
+stock_distinct_price_counts_tbl %>% head(20)
+
+stock_distinct_price_counts_tbl %>% arrange(desc(n_prices)) %>% head(20)
+```
+
+
+
+## Indicate Excluded Rows
+
+There are number of issues with the dataset. 
+
+* Stock code which assigns to M appeals to be short for Manual. Knowing the 'M' is the company's most frequent refund requested item, it must be include for further analysis 
+
+* Damaged goods and unscaleable rows should always be removed from further analysis. 
+
+* Undesired transcational rows inresponsible to customers (financial fees)
+  + Flag these rows that wish to exclude from further analysis.
+
+```{r}
+"%notin%" <- Negate("%in%")
+
+screen_stock_code <- short_stock_codes_tbl %>% pull(stock_code) %>% unique() 
+screen_stock_code_indicator <- c("POST", "D", "DOT", "M", "C2", "PADS", "GIFT", "m", "S", "B", "C3", "CRUK", "ADJUST", "adjust")
+# screen_stock_code_indicator <- screen_stock_code[screen_stock_code %notin% c('M', 'm', "D", "S", "CRUK")]
+
+screen_fee_n_commision <- c("postage","dotcom postage", "sold as set on dotcom","bank charges", "amazon fee", "amazon", "dotcom", "cruk", "packing charge", "amazon adjustment", "sold as set on dotcom and amazon", "cruk commission", "discount", "samples")
+
+
+retail_explore_exclude_tbl <- retail_explore_tbl %>% 
+  mutate(
+       exclude01_sc_flag = case_when(
+          stock_code %in% screen_stock_code_indicator == 1 ~ 1,
+          TRUE ~ 0
+          ),
+        exclude02_damgG_flag = case_when(
+          unit_price == 0 ~ 1,
+          TRUE ~ 0
+          ),
+        exclude03_fee_flag = case_when(
+          str_to_lower(description) %in% screen_fee_n_commision == 1 ~ 1,
+          TRUE ~ 0
+          )
+       )
+
+include_retail_tbl <- retail_explore_exclude_tbl %>% 
+  filter(exclude01_sc_flag == 0) %>%
+  filter(exclude02_damgG_flag == 0) %>%
+  filter(exclude03_fee_flag == 0) 
+
+```
+
+
+## Product Items: Stock Code - Abstact Stock Code Manual
+
+### description and stock_code unmatched
+
+```{r}
+
+# Abstract stock code with multiple descriptions 
+sc_desc_cleaning_tbl <- include_retail_tbl %>% 
+    distinct(description, stock_code) %>%
+    
+    group_by(stock_code) %>% 
+    summarise(
+        .groups = "drop",
+        description = description,
+        count = n()) %>% 
+    arrange(desc(count)) %>% 
+    
+    mutate(unique_flag = ifelse(count == 1, TRUE, FALSE)) 
+
+# Uniform descriptions by second longest naming 
+sc_description_match_tbl <- sc_desc_cleaning_tbl %>% 
+    filter(unique_flag == FALSE) %>% 
+    group_by(stock_code) %>% 
+    mutate(nchar = nchar(description)) %>% 
+    arrange(stock_code, desc(nchar)) %>% 
+    slice(2) %>% ungroup() %>% select(stock_code, description) %>% 
+    bind_rows(
+        sc_desc_cleaning_tbl %>% 
+            filter(unique_flag == TRUE) %>% 
+            select(stock_code, description)
+        )
+
+# Abstract description with multiple stock_code (reverse)
+duplicated_desc_vec <- sc_description_match_tbl %>% 
+    group_by(description) %>% 
+    count(n_distinct(stock_code)) %>% 
+    arrange(desc(n))  %>% 
+    filter(n != 1) %>% 
+    pull(description)
+  
+# Slice descriptions with more popular stock_code 
+desc_stock_code_match_tbl <- include_retail_tbl %>% 
+    mutate(stock_description = str_c(stock_code, description, sep = ":")) %>% 
+    group_by(description) %>% 
+    count(stock_code, stock_description) %>% ungroup() %>% 
+    filter(description %in% duplicated_desc_vec) %>% 
+  
+    group_by(description) %>% 
+    arrange(desc(n)) %>% 
+    slice(1) %>% ungroup() %>% 
+    select(description, stock_code)
+
+# stock_code - description mannual 
+stock_code_description_manual <- sc_description_match_tbl %>% 
+  anti_join(desc_stock_code_match_tbl, by = "description") %>% 
+  bind_rows(desc_stock_code_match_tbl)
+  
+# confirm 
+length(stock_code_description_manual$stock_code) == length(stock_code_description_manual$description)
+
+```
+
+# Save Data 
+
+- Include & exclude data
+
+- stock_code description manual 
+
+- cleaned data 
+
+```{r}
+
+exclude_retail_tbl <- retail_explore_exclude_tbl %>% 
+  filter(row_id %notin% retail_tbl$row_id)
+
+
+cleaned_retail_tbl <- include_retail_tbl %>% 
+  select(-description, -contains("flag"), -sheet_chr) %>% 
+  left_join(stock_code_description_manual, by = "stock_code") %>% 
+  select(1:stock_code, description, everything())
+
+
+# write_rds(include_retail_tbl, file = "00_Data/include_retail_tbl.rds")
+# write_rds(exclude_retail_tbl, file = "00_Data/exclude_retail_tbl.rds")
+# 
+# write_rds(stock_code_description_manual, file = "00_Data/data_wranggled/product_data/stock_code_description_manual.rds")
+#  
+# write_rds(cleaned_retail_tbl, file = "00_Data/data_wranggled/cleaned_retail_tbl.rds")
+```
+
+
+
+

@@ -1,0 +1,85 @@
+---
+title: "Data Retrive"
+author: "Seung Hyun Sung"
+date: "1/20/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r libraries}
+library(fs)
+library(readxl)
+library(tidyverse)
+library(magrittr)
+library(glue)
+library(fs)
+library(curl) 
+```
+
+## Load data from URL and retrive 
+
+```{r}
+data_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/00502/online_retail_II.xlsx"
+xlsx_datafile     <- "00_data/online_retail_II.xlsx"
+if(!file_exists(xlsx_datafile)) {
+    curl_download(
+        data_url,
+        destfile = xlsx_datafile,
+        quiet    = FALSE,
+        mode     = "wb"
+    )
+} else {
+    message(glue("Datafile {xlsx_datafile} found. Skipping download."))
+}
+```
+
+
+## Format data 
+
+Always check number of sheets & col types 
+
+TO DO:
+1. Customer ID is in dbl -> change to character 
+2. Invoice Date dttm -> date and time separate 
+3. Description -> Information too descritive -> compact it (key words)
+
+```{r}
+data_cols <- cols(
+    .default    = col_character(),
+    Quantity    = col_number(),
+    InvoiceDate = col_number(),
+    Price       = col_number()
+)
+
+read_excel_custom <- function(sheet_chr){
+    read_excel(
+        "00_Data/online_retail_II.xlsx",
+        sheet = sheet_chr,
+        col_types = "text") %>% 
+        format_csv() %>% 
+        read_csv(
+            col_types = data_cols
+        ) 
+}
+```
+
+
+```{r}
+excel_format_map_tbl  <- tibble(sheet_chr) %>% 
+    mutate(data = sheet_chr %>% map(read_excel_custom)) 
+
+excel_tbl_unnested <- excel_format_map_tbl %>% 
+    unnest_legacy(data) %>% 
+    rename(CustomerID = `Customer ID`) %>% 
+    janitor::clean_names()
+```
+
+
+```{r}
+excel_tbl_unnested %>% write_rds("00_Data/retail_data_tbl.rds")
+```
+
