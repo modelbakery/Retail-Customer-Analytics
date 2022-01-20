@@ -810,12 +810,12 @@ cleaned_retail_tbl <- include_retail_tbl %>%
   select(1:stock_code, description, everything())
 
 
-# write_rds(include_retail_tbl, file = "00_Data/include_retail_tbl.rds")
-# write_rds(exclude_retail_tbl, file = "00_Data/exclude_retail_tbl.rds")
-# 
-# write_rds(stock_code_description_manual, file = "00_Data/data_wranggled/product_data/stock_code_description_manual.rds")
-#  
-# write_rds(cleaned_retail_tbl, file = "00_Data/data_wranggled/cleaned_retail_tbl.rds")
+write_rds(include_retail_tbl, file = "00_Data/include_retail_tbl.rds")
+write_rds(exclude_retail_tbl, file = "00_Data/exclude_retail_tbl.rds")
+
+write_rds(stock_code_description_manual, file = "00_Data/data_wranggled/product_data/stock_code_description_manual.rds")
+ 
+write_rds(cleaned_retail_tbl, file = "00_Data/data_wranggled/cleaned_retail_tbl.rds")
 ```
 
 
