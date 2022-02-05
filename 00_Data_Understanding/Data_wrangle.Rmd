@@ -60,15 +60,14 @@ There are number of issues with the dataset.
 
 __Problems:__
 - Stock codes have varying descriptions 
+- Stock codes have varying Prices 
 
+Specification 
 * Stock code which assigns to M appeals to be short for Manual. Knowing the 'M' is the company's most frequent refund requested item, it must be include for further analysis 
-
 * Damaged goods and unscaleable rows should always be removed from further analysis. 
-
 * Undesired transcational rows inresponsible to customers (financial fees)
   + Flag these rows that wish to exclude from further analysis.
   
-- Stock codes have varying Prices 
 
 __Solutions:__
 - use most frequenct description (mode)
