@@ -61,12 +61,6 @@ create_excel_datetime <- function(x){
 }
 ```
 
-Pull pre-built functions:
-
-* word_clouding_generator
-    + generator_description_text_extraction
-    + generator_description_word_extraction
-    + generator_word_clouding_vector
 
 
 # Data Moderation 
@@ -100,7 +94,8 @@ retail_explore_tbl <- retail_tbl %>%
     mutate(invoice_month_prop = as.numeric(invoice_dom)/max(as.numeric(invoice_dom)),
            country = as.factor(country),
            neg_stock_value = ifelse(stock_value >= 0, FALSE, TRUE)) %>% 
-    ungroup() 
+    ungroup() %>% 
+  select(-sheet_chr)
 
  
 ```
@@ -109,7 +104,9 @@ retail_explore_tbl <- retail_tbl %>%
 
 # Data Explore
 
-## Missing Customer ID and its multivariable contribution 
+## Data Missingness 
+
+-- Missing Customer ID and its multivariable contribution 
 
 Features with missingness: 
 
@@ -175,10 +172,11 @@ instance_n_income_by_tbl <- retail_explore_tbl %>%
     
     mutate(total_instance_pct    = instance/sum(instance),
            total_income_pct      = total_income/sum(total_income),
-           avg_income_per_cust = total_income/instance)
+           avg_income_per_cust   = total_income/instance)
 
 instance_n_income_by_tbl %>% kbl() %>% kable_material()           
 ```
+
 
 
 ## Univariate Data Explore 
@@ -680,144 +678,5 @@ stock_distinct_price_counts_tbl %>% head(20)
 
 stock_distinct_price_counts_tbl %>% arrange(desc(n_prices)) %>% head(20)
 ```
-
-
-
-## Indicate Excluded Rows
-
-There are number of issues with the dataset. 
-
-* Stock code which assigns to M appeals to be short for Manual. Knowing the 'M' is the company's most frequent refund requested item, it must be include for further analysis 
-
-* Damaged goods and unscaleable rows should always be removed from further analysis. 
-
-* Undesired transcational rows inresponsible to customers (financial fees)
-  + Flag these rows that wish to exclude from further analysis.
-
-```{r}
-"%notin%" <- Negate("%in%")
-
-screen_stock_code <- short_stock_codes_tbl %>% pull(stock_code) %>% unique() 
-screen_stock_code_indicator <- c("POST", "D", "DOT", "M", "C2", "PADS", "GIFT", "m", "S", "B", "C3", "CRUK", "ADJUST", "adjust")
-# screen_stock_code_indicator <- screen_stock_code[screen_stock_code %notin% c('M', 'm', "D", "S", "CRUK")]
-
-screen_fee_n_commision <- c("postage","dotcom postage", "sold as set on dotcom","bank charges", "amazon fee", "amazon", "dotcom", "cruk", "packing charge", "amazon adjustment", "sold as set on dotcom and amazon", "cruk commission", "discount", "samples")
-
-
-retail_explore_exclude_tbl <- retail_explore_tbl %>% 
-  mutate(
-       exclude01_sc_flag = case_when(
-          stock_code %in% screen_stock_code_indicator == 1 ~ 1,
-          TRUE ~ 0
-          ),
-        exclude02_damgG_flag = case_when(
-          unit_price == 0 ~ 1,
-          TRUE ~ 0
-          ),
-        exclude03_fee_flag = case_when(
-          str_to_lower(description) %in% screen_fee_n_commision == 1 ~ 1,
-          TRUE ~ 0
-          )
-       )
-
-include_retail_tbl <- retail_explore_exclude_tbl %>% 
-  filter(exclude01_sc_flag == 0) %>%
-  filter(exclude02_damgG_flag == 0) %>%
-  filter(exclude03_fee_flag == 0) 
-
-```
-
-
-## Product Items: Stock Code - Abstact Stock Code Manual
-
-### description and stock_code unmatched
-
-```{r}
-
-# Abstract stock code with multiple descriptions 
-sc_desc_cleaning_tbl <- include_retail_tbl %>% 
-    distinct(description, stock_code) %>%
-    
-    group_by(stock_code) %>% 
-    summarise(
-        .groups = "drop",
-        description = description,
-        count = n()) %>% 
-    arrange(desc(count)) %>% 
-    
-    mutate(unique_flag = ifelse(count == 1, TRUE, FALSE)) 
-
-# Uniform descriptions by second longest naming 
-sc_description_match_tbl <- sc_desc_cleaning_tbl %>% 
-    filter(unique_flag == FALSE) %>% 
-    group_by(stock_code) %>% 
-    mutate(nchar = nchar(description)) %>% 
-    arrange(stock_code, desc(nchar)) %>% 
-    slice(2) %>% ungroup() %>% select(stock_code, description) %>% 
-    bind_rows(
-        sc_desc_cleaning_tbl %>% 
-            filter(unique_flag == TRUE) %>% 
-            select(stock_code, description)
-        )
-
-# Abstract description with multiple stock_code (reverse)
-duplicated_desc_vec <- sc_description_match_tbl %>% 
-    group_by(description) %>% 
-    count(n_distinct(stock_code)) %>% 
-    arrange(desc(n))  %>% 
-    filter(n != 1) %>% 
-    pull(description)
-  
-# Slice descriptions with more popular stock_code 
-desc_stock_code_match_tbl <- include_retail_tbl %>% 
-    mutate(stock_description = str_c(stock_code, description, sep = ":")) %>% 
-    group_by(description) %>% 
-    count(stock_code, stock_description) %>% ungroup() %>% 
-    filter(description %in% duplicated_desc_vec) %>% 
-  
-    group_by(description) %>% 
-    arrange(desc(n)) %>% 
-    slice(1) %>% ungroup() %>% 
-    select(description, stock_code)
-
-# stock_code - description mannual 
-stock_code_description_manual <- sc_description_match_tbl %>% 
-  anti_join(desc_stock_code_match_tbl, by = "description") %>% 
-  bind_rows(desc_stock_code_match_tbl)
-  
-# confirm 
-length(stock_code_description_manual$stock_code) == length(stock_code_description_manual$description)
-
-```
-
-# Save Data 
-
-- Include & exclude data
-
-- stock_code description manual 
-
-- cleaned data 
-
-```{r}
-
-exclude_retail_tbl <- retail_explore_exclude_tbl %>% 
-  filter(row_id %notin% retail_tbl$row_id)
-
-
-cleaned_retail_tbl <- include_retail_tbl %>% 
-  select(-description, -contains("flag"), -sheet_chr) %>% 
-  left_join(stock_code_description_manual, by = "stock_code") %>% 
-  select(1:stock_code, description, everything())
-
-
-write_rds(include_retail_tbl, file = "00_Data/include_retail_tbl.rds")
-write_rds(exclude_retail_tbl, file = "00_Data/exclude_retail_tbl.rds")
-
-write_rds(stock_code_description_manual, file = "00_Data/data_wranggled/product_data/stock_code_description_manual.rds")
- 
-write_rds(cleaned_retail_tbl, file = "00_Data/data_wranggled/cleaned_retail_tbl.rds")
-```
-
-
 
 

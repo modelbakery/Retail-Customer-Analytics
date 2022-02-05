@@ -3,3 +3,7 @@
 .RData
 .Ruserdata
 00_Data/*
+00_Script/*
+00_Backup/*
+Modeling/*
+Figures/*

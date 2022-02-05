@@ -3,6 +3,9 @@ title: "Cohort_analysis"
 author: "Seung Hyun Sung"
 date: "1/20/2022"
 output:
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
   html_document:
     code_folding: show
     df_print: paged
@@ -11,9 +14,6 @@ output:
     theme: flatly
     toc: yes
     toc_depth: 3
-  pdf_document:
-    toc: yes
-    toc_depth: '3'
 ---
 
 ```{r setup, include=FALSE}
@@ -28,15 +28,31 @@ knitr::opts_chunk$set(
 ```
 
 
+```{r}
+library(tidyverse)
+library(fs)
+library(readr)
+library(stringr)
+library(tidyquant)
+library(glue)
+library(scales)
+library(ggthemes) 
+library(mdthemes) 
+library(gghighlight)
+library(formattable)
+```
+
 
 ```{r}
 # Read Data 
-cleaned_retail_tbl <- read_rds(file = "00_data/data_wranggled/cleaned_retail_tbl.rds")
+cleaned_retail_tbl <- read_rds(file = "00_Data/data_wranggled/cleaned_retail_tbl.rds")
+exclude_retail_tbl <- read_rds(file = "00_Data/exclude_retail_tbl.rds")
 
-cleaned_retail_tbl %>% glimpse()
-    select()
+item_ngram_tokenized_tbl <- read_rds(file = "00_Data/data_wranggled/product_data/item_ngram_tokenized_tbl.rds")
+stock_code_description_manual_tbl <- read_rds(file = "00_Data/data_wranggled/product_data/stock_code_description_manual.rds")
+
+source("00_Script/function_factory/NLP_automate_function.R")
 ```
-
 
 
 The transaction data captures every transactions including customer purchasing multiple products at different times. 
@@ -53,15 +69,12 @@ trans_purhase_tbl <- cleaned_retail_tbl %>%
     invoice_date, invoice_id, stock_code, customer_id, description,
     quantity, unit_price, stock_value
     ) %>% 
-  drop_na(customer_id)
+  filter(!is.na(customer_id))
 
 
-trans_purhase_tbl %>% 
-    filter(stock_code == 85048)
-
-
-# Daily Invoice Table 
-daily_spend_invoice_tbl <- trans_purhase_tbl %>% 
+# Transaction per Invoice Table 
+trans_invoice_tbl <- trans_purhase_tbl %>% 
+  filter(!is.na(customer_id)) %>% 
   group_by(invoice_date, customer_id, invoice_id) %>% 
   summarise(
     .groups           = "drop",
@@ -69,16 +82,185 @@ daily_spend_invoice_tbl <- trans_purhase_tbl %>%
     invoice_spend     = sum(stock_value)
     ) 
 
-# Daily Customer Table 
-daily_spend_tbl <- daily_spend_invoice_tbl %>% 
+
+# Transaction per Customer Table 
+trans_cust_tbl <- trans_invoice_tbl %>% 
+  filter(!is.na(customer_id)) %>% 
   group_by(invoice_date, customer_id) %>% 
     summarise(
     .groups           = "drop",
     n_trans           = n(),
     invoice_spend     = sum(invoice_spend)
     ) 
+
+write_rds(trans_purhase_tbl, file = "00_Data/data_wranggled/trans_data/trans_purhase_tbl.rds")
+
+write_rds(trans_invoice_tbl, file = "00_Data/data_wranggled/trans_data/trans_invoice_tbl.rds")
+
+write_rds(trans_cust_tbl, file = "00_Data/data_wranggled/trans_data/trans_cust_tbl.rds")
+
+```
+
+
+# Understand the Business 
+
+
+```{r}
+trans_customer_cohort_tbl <- trans_invoice_tbl %>% 
+  group_by(customer_id) %>% 
+  mutate(cohort_date = floor_date(min(invoice_date), "month")) %>% 
+  ungroup() 
+  
+cohort_by_date_metrics <- trans_customer_cohort_tbl %>% 
+    mutate(invoice_date = floor_date(invoice_date, "month")) %>% 
+    group_by(invoice_date, cohort_date) %>% 
+    summarise(
+        .groups = "drop",
+        n_trans = n(),
+        n_items = sum(n_items),
+        revenue = sum(invoice_spend)
+    ) %>% 
+    mutate(cohort_date = cohort_date %>% format("%Y %m")) 
+  
+cohort_by_date_metrics %>% 
+    ggplot() +
+    geom_area(aes(invoice_date, revenue, fill = cohort_date),
+              colour = "white", size = 1,
+              position = position_stack(reverse = T)) +
+  theme_tq() +
+  theme(legend.position = "none")
+
+```
+
+
+```{r}
+cohort_by_date_metrics %>% 
+    filter(!cohort_date == "2009 12") %>% 
+    ggplot() +
+    geom_area(aes(invoice_date, revenue, fill = cohort_date),
+              colour = "white", size = 1,
+              position = position_stack(reverse = T)) +
+  theme_tq() +
+  theme(legend.position = "none")
+```
+
+
+
+
+```{r}
+xx <- function(data, period = week, var = revenue){
+  
+  period_enquo <- enquo(period)
+  period_name <- quo_name(period_enquo)
+  
+  data %>% 
+  mutate(invoice_date = floor_date(invoice_date, period_name)) %>% 
+  group_by(invoice_date) %>% 
+  mutate(
+    n_trans     = n(),
+    tot_n_items = sum(n_items) %>% round(0),
+    revenue     = sum(invoice_spend) %>% round(2)) %>% 
+  ggplot(aes(invoice_date, {{var}})) +
+  geom_line() +
+  theme_tq()
+}
+trans_invoice_tbl %>% xx()
+```
+
+
+# Understand the drivers 
+
+## Investigate if objectives are being met - Cohort Comparison between 2010 and 2011 
+
+### [1] Cohort Average Monthly Revenue Metrics 
+
+### [2] Avg. Order Value Metrics
+
+### [3] Number of Transcations Metrics
+
+```{r}
+customer_cohort_rev_tbl <- trans_invoice_tbl %>% 
+  group_by(customer_id) %>% 
+  summarise(
+    .groups = "drop",
+    cohort_date     = lubridate::floor_date(min(invoice_date), "month"),
+    n_trans         = n(),
+    monetary_value  = sum(invoice_spend),
+    med_order_value = median(invoice_spend) %>% round(2),    
+    avg_order_value = mean(invoice_spend)   %>% round(2)
+  ) 
+```
+
+
+```{r}
+cohort_rev_tbl <- trans_invoice_tbl %>% 
+  left_join(
+    customer_cohort_rev_tbl %>% select(customer_id, cohort_date), 
+    by = "customer_id"
+    ) %>% 
+  group_by(cohort_date) %>% 
+  summarise(.groups              = "drop",
+            n_cust               = n(),
+            tot_n_trans          = sum(n_trans),
+            avg_n_trans_per_cust = (tot_n_trans/n_cust)  %>% round(2),
+            med_order_value      = mean(med_order_value) %>% round(2),
+            avg_order_value      = mean(avg_order_value) %>% round(2),
+            revenue              = sum(monetary_value)   %>% round(2)) %>% 
+  mutate(
+    no_months  = rev(row_number()),
+    avg_monthly_revenue = revenue/no_months,
+    cohort_ym  = cohort_date %>% format("%Y %m"),
+    .after = "n_cust"
+    ) %>% 
+  separate(cohort_ym, into = c("cohort_year", "cohort_month"), remove = T, sep = " ") %>% 
+  filter(!cohort_year == "2009") 
   
 ```
+
+
+Cohort lollipop plot 
+
+```{r}
+cohort_rev_tbl %>% 
+    mutate(cohort = cohort_date %>% as.yearmon) %>% 
+    # label text 
+    mutate(
+        avg_monthly_revenue_text = scales::dollar(avg_monthly_revenue, scale = 1e-3, suffix = "K"),
+        label_text = str_glue("Cohort: {cohort}\nAvg.Revenue:{avg_monthly_revenue_text}\nNew Customer:{n_cust}\nNo.Transcation:{tot_n_trans}")
+    ) %>% 
+    ggplot(aes(avg_monthly_revenue, cohort_month)) +
+    geom_segment(aes(xend = 0, yend = cohort_month), size = 0.5) +
+    geom_point(aes(size = avg_monthly_revenue)) +
+    
+    # label 
+    geom_label(aes(label = label_text),
+               size = 1,
+               hjust = "inward",
+               colour = palette_light()[1]) +
+    # formatting
+    scale_x_continuous(labels = scales::dollar_format(scale = 1e-3, suffix = "K")) +
+    facet_grid(~cohort_year) +
+    labs(
+        title = str_glue(""),
+        x = "Avg.Revenue(monthly)",
+        y = "Month"
+    ) +
+    theme_tq() +
+    theme(
+        legend.position = "none",
+        plot.title = element_text(face = "bold"),
+        plot.caption = element_text(face = "bold.italic")
+    )
+```
+
+
+
+
+
+
+
+
+
 
 
 
