@@ -1,0 +1,126 @@
+---
+title: "Cohort Analysis"
+author: "Seung Hyun Sung"
+date: "2/4/2022"
+output: 
+    html_document:
+        theme: flatly
+        toc: true
+        toc_depth: 2
+---
+
+```{r}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    eval = TRUE,
+    message = FALSE,
+    warning = FALSE,
+    dpi = 300,
+    fig.align = "center"
+    )
+```
+
+```{r libraries}
+library(tidyverse)
+library(fs)
+library(readr)
+library(stringr)
+library(tidyquant)
+library(glue)
+library(scales)
+library(ggthemes) 
+library(mdthemes) 
+library(gghighlight)
+library(formattable)
+```
+
+
+# Data
+
+```{r}
+retail_order_tbl <-  read_rds("00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
+
+products_manual_tbl <-  read_rds("00_Data/data_wranggled/product_data/products_manual_tbl.rds")
+
+```
+
+```{r}
+# Transaction per Invoice Table 
+trans_invoice_tbl <- retail_order_tbl %>% 
+  filter(!is.na(customer_id)) %>% 
+  group_by(invoice_date, customer_id, invoice_id) %>% 
+  summarise(
+    .groups           = "drop",
+    n_items           = n(),
+    invoice_spend     = sum(stock_price)
+    ) 
+
+
+# Transaction per Customer Table 
+trans_cust_tbl <- trans_invoice_tbl %>% 
+  group_by(invoice_date, customer_id) %>% 
+    summarise(
+    .groups           = "drop",
+    n_trans           = n(),
+    invoice_spend     = sum(invoice_spend)
+    ) 
+```
+
+
+```{r}
+customer_cohort_tbl <- trans_invoice_tbl %>% 
+  group_by(customer_id) %>% 
+  summarise(cohort_date = floor_date(min(invoice_date), "month")) %>% 
+  ungroup() 
+```
+
+
+```{r}
+cohort_purchase_behaviour_tbl <- customer_cohort_tbl %>% 
+    left_join(trans_invoice_tbl) %>% 
+    mutate(invoice_date = floor_date(invoice_date, "month")) %>% 
+    group_by(invoice_date, cohort_date) %>% 
+    summarise(
+        .groups = "drop",
+        n_trans = n(),
+        n_items = sum(n_items),
+        revenue = sum(invoice_spend)
+    ) %>% 
+    mutate(cohort_date = cohort_date %>% format("%Y %m")) 
+  
+cohort_purchase_behaviour_tbl %>% 
+    ggplot() +
+    geom_area(aes(invoice_date, revenue, fill = cohort_date),
+              colour = "white", size = 1,
+              position = position_stack(reverse = T)) +
+  theme_tq() +
+  theme(legend.position = "none")
+```
+
+
+# Pre-made Functions
+
+```{r}
+source("00_Business_Understanding/Functions/interactive_cohort_retention.R")
+```
+
+
+```{r}
+# Customer retention Heatmap 
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% get_cohort_heatmap() %>% plot_heatmap(measure_var = retention)
+
+# Customer retention trend
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% abstract_by_cohort(cohort_label = all) %>% get_retention_by_status() %>% plot_retention_status()
+
+# Customer retention proportion breakdown 
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% abstract_by_cohort(cohort_label = all) %>% get_retention_by_status() %>% plot_retention_breakdown()
+
+# Periodic Spending trend
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% abstract_by_cohort(cohort_label = all) %>% plot_spending_trend() 
+
+# *Customer* average spending distribution 
+trans_cust_tbl %>% abstract_cust_spend_by_period(month) %>% abstract_by_cohort(cohort_label = all) %>% plot_spending_distribution()
+
+```
+
+
