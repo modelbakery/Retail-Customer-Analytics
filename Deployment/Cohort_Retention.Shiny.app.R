@@ -62,7 +62,7 @@ ui <- fluidPage(
     sidebarPanel(
       width = 3,
       h1("Retail Customer Cohort Heatmap"),
-      h3("by Model Bakery") %>% tags$a(href = 'https://www.business-science.io/', target="_blank"),
+      h3("by Model Bakery") %>% tags$a(href = 'https://modelbakery-academic.netlify.app', target="_blank"),
       p("Cohort analysis allows you to segment customers based on when they first bought from the retailer, and see how many customers based on when they first bought from the retailer, and see how many customers remained after a set number of months.
          For each cohort, you can see how many remained over time, and what was the average spend per transcation for those remaining customers."),
       br(),
