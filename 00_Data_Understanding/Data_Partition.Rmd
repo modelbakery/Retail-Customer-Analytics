@@ -54,8 +54,9 @@ cohort_selected_tbl <- trans_invoice_tbl %>%
 
 
 # 3. Train, Validation and Test splitting function
--- Random Splitting by Customer id 
--- Time Splitting (assessing 90 Days)
+-- Step_1: Random Splitting by Customer id 
+-- Step_2: Time Splitting (assessing 90 Days)
+-- Step_3: Abstract Validation set from Test data
 
 ```{r}
 set.seed(43)
@@ -110,5 +111,9 @@ targets_test_tbl <- testing(splits_2_test) %>%
         spend_90_total = sum(invoice_spend),
         spend_90_flag  = 1
         ) 
+
+training(splits_2_train)
+
+training(splits_2_test)
 ```
 

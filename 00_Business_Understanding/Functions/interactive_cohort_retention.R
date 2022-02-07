@@ -10,7 +10,7 @@ function(period){
     # add label "all" -> Entire Cohort 
     tibble(cohort = "all") %>% 
         bind_rows(
-            daily_spend_invoice_tbl %>% 
+          trans_invoice_tbl %>% 
                 abstract_by_period(!!period_name) %>% 
                 distinct(cohort)
         )

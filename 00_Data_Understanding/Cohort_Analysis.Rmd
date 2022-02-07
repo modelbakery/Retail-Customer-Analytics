@@ -55,7 +55,6 @@ trans_invoice_tbl <- retail_order_tbl %>%
     invoice_spend     = sum(stock_price)
     ) 
 
-
 # Transaction per Customer Table 
 trans_cust_tbl <- trans_invoice_tbl %>% 
   group_by(invoice_date, customer_id) %>% 
@@ -96,6 +95,7 @@ cohort_purchase_behaviour_tbl %>%
   theme_tq() +
   theme(legend.position = "none")
 ```
+
 
 
 # Pre-made Functions
