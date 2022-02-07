@@ -17,20 +17,27 @@ library(timetk)
 library(glue)
 library(rlang)
 
+
+# SET-UP ----
+
+# Environment 
 setwd("/Users/seunghyunsung/Documents/GitHub/Retail-Customer-Analytics")
-# DATA SETUP ----
+
+# DATA 
 trans_invoice_tbl <- read_rds("00_Data/data_wranggled/trans_data/trans_invoice_tbl.rds")
 trans_cust_tbl <- read_rds("00_Data/data_wranggled/trans_data/trans_cust_tbl.rds")
 
+# Source Functions 
 source("00_Script/select_period_n_cohort_n_statusIII.R")
 
-periods <- c("month", "quarter")
+
+# Interactive UI {Event Button}
 
 # Period List (Input User)
+periods <- c("month", "quarter")
 period_list_tbl <- tibble(period = periods) 
 
-
-# depending on the UI(period) selected ---> list for UI(cohorts_label) 
+# Depending on the UI(period) selected ---> list for UI(cohorts_label) 
 period_cohort_map_tbl  <- period_list_tbl %>% 
   mutate(cohort_label = map(period, generator_cohort_list_mapper))
 
