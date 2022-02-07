@@ -1,0 +1,19 @@
+---
+title: "Data Partition"
+author: "Seung Hyun Sung"
+date: "2/4/2022"
+output: 
+    html_document:
+        theme: flatly
+        toc: true
+        toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    message = FALSE,
+    warning = FALSE)
+```
+
+
