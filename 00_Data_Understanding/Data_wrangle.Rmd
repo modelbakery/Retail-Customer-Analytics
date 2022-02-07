@@ -18,7 +18,7 @@ knitr::opts_chunk$set(
 
 ```{r libraries}
 library(tidyverse)
-library(glues)
+library(glue)
 ```
 
 
@@ -43,6 +43,7 @@ wrangle_raw_data <- function(data){
         invoice_dttm   = create_excel_datetime(invoice_date),
         invoice_date   = as.Date(invoice_dttm),
         stock_code     = stock_code %>% str_to_upper(),
+        description    = description %>% str_to_upper(),
         description    = str_replace_all(description, "[^[:alnum:]]", " "),
         cancellation   = str_to_upper(str_detect(invoice_id, "^C"))
         ) %>% 
@@ -102,49 +103,50 @@ products_summarised_tbl <- products_tbl %>%
     arrange(desc(n))
 ```
 
-
+Remove unneccessary (irrelevant) to transaction products from the product summary table 
 
 ```{r}
-screen_stock_code_list <- c("POST", "M","D", "DOT", "C2", "PADS", "GIFT", "S", "B", "C3", "CRUK", "adjust")
-screen_description_list <- c("postage","dotcom postage", "sold as set on dotcom","bank charges", "amazon fee", "amazon", "dotcom", "cruk", "packing charge", "amazon adjustment", "sold as set on dotcom and amazon", "cruk commission", "discount", "samples")
-    
+irrelevant_stock_code_list <- c("POST", "M","D", "DOT", "C2", "PADS", "GIFT", "S", "B", "C3", "CRUK", "adjust")
+
+screen_irrelevant_stock_code_list <- c("ADJUST", "GIFT_0001", "TEST", "BANK", "CHARGE", "AMAZON")
+
+irrelevant_description_list <- c("postage","dotcom postage", "sold as set on dotcom","bank charges", "amazon fee", "amazon", "dotcom", "cruk", "packing charge", "amazon adjustment", "sold as set on dotcom and amazon", "cruk commission", "discount", "samples", "lost")
+
 products_manual_tbl <- products_summarised_tbl %>% 
-    filter(!stock_code %>% str_detect("ADJUST|GIFT_0001|TEST|BANK|CHARGE|AMAZON")) %>% 
-    filter(!stock_code %in% screen_stock_code_list) %>% 
-    filter(!mode_description %in% str_to_upper(screen_description_list))
+    filter(!stock_code %>% str_detect(paste(str_to_upper(screen_irrelevant_stock_code_list), collapse = "|"))) %>% 
+    filter(!stock_code %in% str_to_upper(irrelevant_stock_code_list)) %>% 
+    filter(!mode_description %in% str_to_upper(irrelevant_description_list))
+
 ```
 
 
+# Transaction Data Wranggled 
+
+__Notion__:
+- products_manual_tbl: Uniform stock code to description manual data 
+- retail_transaction_tbl: Wranggled transaction data (store as backup)
+  -- retail_order_tbl: transaction order data without cancellation/refund 
+
 ```{r}
-cleaned_retail_tbl <- cleaning_tbl %>% 
-    select(-description) %>% 
-    left_join(products_manual_tbl %>% select(-n), by = "stock_code") %>% 
-    rename(description = mode_description) %>% 
-    select(customer_id, invoice_date, invoice_id, stock_code, description, median_unit_price, everything()) 
-
-retail_order_tbl <- cleaned_retail_tbl %>% 
-    filter(unit_price != 0) %>% 
-    filter(cancellation != TRUE)
-
-retail_cancellation_tbl <- cleaned_retail_tbl %>% 
-    filter(unit_price != 0) %>% 
-    filter(cancellation == TRUE)
+retail_transaction_tbl <- cleaning_tbl %>% 
+    filter(!stock_code %>% str_detect(paste(str_to_upper(screen_irrelevant_stock_code_list), collapse = "|"))) %>% 
+    filter(!stock_code %in% str_to_upper(irrelevant_stock_code_list)) %>% 
+    filter(!description %in% str_to_upper(irrelevant_description_list)) %>%
+    filter(unit_price > 0) %>% 
+    # Add stock price 
+    mutate(stock_price = quantity*unit_price)
+    
+retail_order_tbl <- retail_transaction_tbl %>% 
+  filter(cancellation != TRUE)
 ```
 
 # Save Data 
 
-- products_manual_tbl: Uniform stock code to description manual data 
-- retail_order_tbl: Wranggled transcational data 
-- retail_cancellation_tbl: Wranggled cancelled transcation data
-- cleaned_retail_tbl: Back-up 
-
 ```{r}
 write_rds(products_manual_tbl, "00_Data/data_wranggled/product_data/products_manual_tbl.rds")
 
+write_rds(retail_transaction_tbl, file = "00_Data/data_wranggled/trans_data/retail_transaction_tbl.rds")
+
 write_rds(retail_order_tbl, file = "00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
-
-write_rds(retail_cancellation_tbl, file = "00_Data/data_wranggled/trans_data/retail_cancellation_tbl.rds")
-
-write_rds(cleaned_retail_tbl, file = "00_Data/cleaned_retail_tbl.rds")
 
 ```
