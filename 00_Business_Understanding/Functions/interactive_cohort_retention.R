@@ -1,9 +1,13 @@
+################################################################################
+# Cohort Retention Functions for Interactive Dashboard - RShiny App
+################################################################################
+# Pull list of Cohort + "all" label for Reactive Button
 generator_cohort_list_mapper <-
 function(period){
     
     period_expr <- enquo(period)
     period_name <- quo_name(period_expr)
-    # add label 
+    # add label "all" -> Entire Cohort 
     tibble(cohort = "all") %>% 
         bind_rows(
             daily_spend_invoice_tbl %>% 
@@ -11,6 +15,8 @@ function(period){
                 distinct(cohort)
         )
 }
+
+# 
 abstract_by_period <-
 function(data, period = month){
     
@@ -32,6 +38,7 @@ function(data, period = month){
     return(prep_tbl)
     
 }
+
 abstract_by_cohort <-
 function(data, cohort_label = all){
     
@@ -57,6 +64,7 @@ function(data, cohort_label = all){
     
     return(filter_tbl)
 }
+
 abstract_cust_spend_by_period <-
 function(data, period = month){
     
@@ -348,6 +356,8 @@ function(data, interactive = TRUE){
   }
   
 }
+
+
 plot_spending_distribution <-
 function(data){
 
