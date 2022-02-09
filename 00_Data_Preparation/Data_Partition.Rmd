@@ -1,0 +1,228 @@
+---
+title: "Data Partition"
+author: "Seung Hyun Sung"
+date: "2/4/2022"
+output: 
+    html_document:
+        theme: flatly
+        toc: true
+        toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    message = FALSE,
+    warning = FALSE)
+```
+
+
+```{r libraries}
+library(tidyverse)
+library(fs)
+library(timetk)
+```
+
+
+# 1. Data 
+```{r}
+trans_invoice_tbl <- read_rds("00_Data/data_wranggled/trans_data/trans_invoice_tbl.rds")
+
+retail_order_tbl <- read_rds("00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
+```
+
+
+
+# 2. Set cohort Span 
+- Set initial purchase 
+```{r}
+
+filter_by_cohort_span <- function(data, 
+                                  .start_date = "2009-12",
+                                  .end_date = "2010-12"){
+    
+    first_purhase_tbl <- trans_invoice_tbl %>% 
+        group_by(customer_id) %>% 
+        slice_min(invoice_date) %>% 
+        ungroup()
+    
+    ids_cohort_selected <- first_purhase_tbl %>% 
+    # Set Cohort Range
+    filter_by_time(
+        .start_date = .start_date,
+        .end_date   = .end_date
+    ) %>% 
+    pull(customer_id) 
+    
+    cohort_selected_tbl <- data %>% 
+    filter(customer_id %in% ids_cohort_selected)
+}
+
+cohort_selected_tbl <- retail_order_tbl %>%
+    filter_by_cohort_span(.start_date = "2009-12",
+                          .end_date = "2010-12")
+```
+
+
+# 3. Train, Validation and Test splitting function
+-- Step_1: Random Splitting by Customer id 
+-- Step_2: Time Splitting (assessing 90 Days)
+-- Step_3: Abstract Validation set from Test data
+
+```{r}
+
+split_by_id <- function(data, .size = 0.8){
+    set.seed(42)
+    ids_train <- data %>% 
+    pull(customer_id) %>% 
+    unique() %>% 
+    sample(size = round(.size*length(.))) %>% 
+    sort()
+    
+    # Train set 
+    split_1_train_tbl <- cohort_selected_tbl %>% 
+    filter(customer_id %in% ids_train)
+    
+    # Test set 
+    split_1_test_tbl <- cohort_selected_tbl %>% 
+    filter(!customer_id %in% ids_train) 
+    
+    out <- list(train = split_1_train_tbl, test = split_1_test_tbl)
+    return(out)
+}
+
+step_1_split <- cohort_selected_tbl %>% split_by_id(.size = 0.8)
+
+# Validation ids 
+# ids_validation <- cohort_selected_tbl %>% 
+#     filter(!customer_id %in% ids_train) %>% 
+#     pull(customer_id) %>% 
+#     unique() %>% 
+#     sample(size = round(0.5*length(.))) %>% 
+#     sort()
+    
+
+
+```
+
+
+
+```{r}
+
+split_by_time <- function(data, .assess_days = "90"){
+    split_2 <- time_series_split(
+        data,
+        assess = str_glue("{.assess_days} days"),
+        cumulative = TRUE
+    ) 
+    
+    # For 90-days forecast (testing) add spending label + amount 
+    split_2_test_tbl<- testing(split_2) %>% 
+        group_by(customer_id) %>% 
+        summarise(
+            "spend_{.assess_days}_total" := sum(stock_price),
+            "spend_{.assess_days}_flag"  := 1
+            ) 
+    
+    # Return training 
+    split_2_train_tbl<- training(split_2) 
+    
+    out <- list(train = split_2_train_tbl, test = split_2_test_tbl)
+    
+    return(out)
+}
+
+step_2_split_train <- step_1_split$train %>% split_by_time()
+step_2_split_test  <- step_1_split$test %>% split_by_time()
+
+```
+
+
+```{r}
+step_2_split_train$train %>% glimpse()
+step_2_split_train$test %>% glimpse()
+
+step_2_split_test$train %>% glimpse()
+step_2_split_test$test %>% glimpse()
+```
+
+# Save Partition Data 
+
+```{r}
+write_rds(step_2_split_train, "00_Data/data_split/step_2_split_train.rds")
+write_rds(step_2_split_test,  "00_Data/data_split/step_2_split_test.rds")
+```
+
+
+```{r}
+product_retention_clusters_tbl <- read_rds("00_Data/data_wranggled/cluster_data/product_retention_clusters_tbl.rds")
+
+product_term_clusters_tbl <- read_rds("00_Data/data_wranggled/cluster_data/product_term_clusters_tbl.rds")
+
+customer_habits_joined_tbl <- read_rds("00_Data/data_wranggled/cluster_data/customer_habits_joined_tbl.rds")
+```
+
+
+# Merage + rfm 
+```{r}
+training(splits_2_train) %>% 
+    left_join(invoice_item_tokenized_tbl, by = "invoice_id") %>% 
+    group_by(customer_id) %>% 
+    summarise(across(tf_ngram_3:tf_ngram_white, sum)) %>% 
+    mutate_at(vars(matches("tf_ngram")), ~replace_na(., 0))
+
+test_customer_tokenize_tbl <- training(splits_2_test) %>% 
+    left_join(invoice_item_tokenized_tbl, by = "invoice_id") %>% 
+    group_by(customer_id) %>% 
+    summarise(across(tf_ngram_3:tf_ngram_white, sum)) %>% 
+    mutate_at(vars(matches("tf_ngram")), ~replace_na(., 0))
+
+analy_date_train <- training(splits_2_train) %>% 
+    pull(invoice_date) %>% 
+    max() + 1
+
+
+train_tbl <- training(splits_2_train) %>% 
+    group_by(customer_id) %>% 
+    summarise(
+        recency       = (analy_date_train - max(invoice_date))/ ddays(1),
+        frequency     = n(),
+        monetary      = sum(invoice_spend),
+        avg_monetary  = mean(invoice_spend) %>% round(2),
+        total_n_items = sum(n_items),
+        avg_n_items   = mean(n_items) %>% round(0)
+    ) %>% 
+    left_join(targets_train_tbl) %>% 
+    replace_na(replace = list(
+        spend_90_total = 0,
+        spend_90_flag  = 0
+    )) %>% 
+    mutate(spend_90_flag = as.factor(spend_90_flag)) %>% 
+    left_join(train_customer_tokenize_tbl, by = "customer_id") 
+    
+
+test_tbl <- training(splits_2_test) %>% 
+    group_by(customer_id) %>% 
+    summarise(
+        recency       = (analy_date_train - max(invoice_date))/ ddays(1),
+        frequency     = n(),
+        monetary      = sum(invoice_spend),
+        avg_monetary  = mean(invoice_spend) %>% round(2),
+        total_n_items = sum(n_items),
+        avg_n_items   = mean(n_items) %>% round(0)
+    ) %>% 
+    left_join(targets_test_tbl) %>% 
+    replace_na(replace = list(
+        spend_90_total = 0,
+        spend_90_flag  = 0
+    )) %>% 
+    mutate(spend_90_flag = as.factor(spend_90_flag)) %>% 
+    left_join(test_customer_tokenize_tbl, by = "customer_id") 
+
+
+validation_tbl <- test_tbl %>% 
+    filter(customer_id %in% ids_validation)
+
+
+```
+

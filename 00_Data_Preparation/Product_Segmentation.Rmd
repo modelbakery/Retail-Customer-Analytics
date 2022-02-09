@@ -1,0 +1,387 @@
+---
+title: "Product Segmentation"
+author: "Seung Hyun Sung"
+date: "2/4/2022"
+output: 
+    html_document:
+        theme: flatly
+        toc: true
+        toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    message = FALSE,
+    warning = FALSE)
+```
+
+```{r libraries}
+# libraries
+library(knitr)
+library(timetk)
+library(tidytext)
+library(plotly)
+library(ggwordcloud)
+library(ggiraphExtra)
+library(fs)
+library(readr)
+library(tidyverse)
+library(tidymodels)
+library(tidyquant)
+library(recipes)
+library(umap)
+# Python integration 
+library(reticulate)
+```
+
+## Setup R' spython interface (conda py3.8 Environment)
+
+conda create -n py3.8 python=3.8 scikit-learn pandas numpy matplotlib
+ This code does the following:
+   - Creates a new Python environment called “py3.8”
+   - Installs python version 3.8
+   - Installs the latest versions of scikit-learn, pandas, numpy, and matplotlib.
+
+Replace this with your conda environment containing sklearn, pandas, & numpy
+
+```{r}
+use_condaenv("py3.8", required = TRUE)
+```
+
+
+# 1. Data 
+
+```{r}
+retail_order_tbl <-  read_rds("00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
+
+products_manual_tbl <-  read_rds("00_Data/data_wranggled/product_data/products_manual_tbl.rds")
+
+country_holiday_tbl <- read_rds("00_Data/country_holiday_tbl.rds")
+
+step_2_split_test <- read_rds("00_Data/data_split/step_2_split_test.rds")
+
+step_2_split_train <- read_rds("00_Data/data_split/step_2_split_train.rds")
+```
+
+
+```{r}
+train_data_tbl   <- step_2_split_train$train
+train_label_tbl <- step_2_split_train$test
+
+```
+
+
+# 2. Product (Unsupervised) Clustering 
+
+__Hypothesis:__
+- Similar Products Embeds Similar Word Token 
+- Similar Products Have Similar Price Variations 
+- Similar Products Have Similar Stock Codes (digits)
+
+__Algorithm:__
+- Kmeans: Distance-Based Metric Learning 
+- DBSCAN:  Density-Based Metric Learning 
+
+
+# 3. Products Feature Engineering 
+
+__Problems:__
+- Products are highly unique and has no categories 
+- Need categories to learn which customers are similar in purchasing behaviour 
+
+__Solution:__
+- Price Feature Engineering will help group products by price categories 
+-  Text Feature Engineering is essential to compare description fields
+- Stock Code Engineering will group products with similar catalogue
+
+
+## Product Rank by purchase frequency 
+- Possible alternatives: 
+    - Rank product by customer retention (monthly)
+    - Rank product by seasonal robustness 
+
+
+## 3.1 Text Feature Engineering
+- Use 'tidytext' to unnest tokens 
+- Stems the tokens using 'hunspell' to return only the root of the word 
+
+```{r}
+product_disctionary <- function(data){
+    out_tbl <- data %>% 
+    select(stock_code, description) %>% 
+    unnest_tokens(terms, description, token = "words") %>% 
+    filter(!(nchar(terms) == 1)) %>% 
+    mutate(terms = hunspell::hunspell_stem(terms)) %>% 
+    unnest(terms) %>% 
+    mutate(n = 1)
+    return(out_tbl)
+}
+products_disctionary_tbl <- products_manual_tbl %>%
+    product_disctionary()
+
+```
+
+
+### 2.1.1 Term Frequency
+
+- Count Frequency 
+- Remove Stop words (e.g. "of" has no meaning)
+- Remove colour terms(e.g. "pink" has no meanings)
+- Remove terms with numbers (e.g. "130.5cm" has no meaning)
+
+```{r}
+terms_frequency_tbl <- products_disctionary_tbl %>% 
+    # Remove unnecessary terms 
+    anti_join(stop_words, by = c("terms" = "word")) %>% 
+    # Remove colour terms 
+    filter(!terms %in% colours()) %>% 
+    # Remove terms with numbers 
+    filter(!terms %>% str_detect(pattern = "[0-9]")) %>% 
+    # summarise -0> abstract frequency 
+    group_by(terms) %>% 
+    summarise(
+        n = sum(n)
+    ) %>% 
+    arrange(desc(n))
+
+```
+
+
+### 2.1.2 Term Frequency Visualisation
+
+```{r}
+source("00_Data_Understanding/Visualisation_function/visual.R")
+```
+
+
+* Cumulative Plot 
+-- Flexible Filtering: Rank & Filter terms by Cumulative Sum 
+-- Cumulative Sum above 50% -> Relevant Term
+
+```{r}
+rank_term_frequency_tbl <- terms_frequency_tbl %>% 
+  get_rank_cumulative(.cumulative_max = 0.5)
+
+rank_term_frequency_tbl %>% plot_rank_cumulative(max_slice = 500)
+
+```
+
+* Word Cloud Plot 
+
+```{r}
+terms_frequency_tbl %>% 
+    slice(1:100) %>% 
+    mutate(terms = as_factor(terms) %>% fct_rev()) %>% 
+    ggplot() + 
+    geom_text_wordcloud_area(aes(label = terms, size = n, colour = n)) +
+    scale_size_area(max_size = 14) +
+    scale_colour_viridis_c(direction = -1) +
+    theme(plot.background = element_rect(fill = "black"),
+          panel.background = element_rect(fill = "black"))
+```
+
+
+### Fiter Term Frequency 
+
+```{r}
+top_100_terms <- terms_frequency_tbl %>% slice(1:100) %>% pull(terms)
+
+product_term_feature_tbl <- products_disctionary_tbl %>% 
+    filter(terms %in% top_100_terms) %>% 
+    pivot_wider(
+        names_from = terms,
+        values_from = n,
+        values_fill = list(n = 0),
+        values_fn = list(n = sum)
+    )
+```
+
+### 3.2 Price Feature Engineering 
+- Highly Skewed (damaging for distance based clustering) 
+
+```{r}
+product_price_range_tbl <- train_data_tbl %>% 
+  group_by(stock_code) %>% 
+  summarise(
+    .groups     = "drop",
+    n_prices    = n(),
+    med_price   = median(unit_price) %>% round(2),
+    mean_price   = median(unit_price) %>% round(2),
+    min_price   = min(unit_price),
+    p25_price   = quantile(unit_price)[2],
+    p50_price   = quantile(unit_price)[3],
+    p75_price   = quantile(unit_price)[4],
+    max_price   = max(unit_price),
+    range_price = ((max_price - min_price)/ mean_price) %>% round(2)
+  ) 
+
+```
+
+
+### 3.2 Stock Code Feature Engineering 
+
+```{r}
+product_code_tbl <- product_term_feature_tbl %>% 
+  select(stock_code) %>% 
+  mutate(code = str_replace(stock_code, "[a-zA-Z ]", ""))  %>% 
+  separate(col = code,
+           into = str_c("code_digit_", 6:1),
+           sep = "",
+           remove = FALSE) %>% 
+  select(-code_digit_6) %>% 
+  mutate_at(vars(starts_with("code_digit_")), funs(as.numeric)) %>%
+  select(-code) 
+```
+
+
+# Engineered Feature Preprocessing 
+
+Pre-processing steps
+Step_1: Remove near zero variance feature 
+-- This step will remove most of the tokenised term features with its variance below given frequency threshold 
+Step_2: Yeo-Johnson generalised transformation will be operated to numeric price data with heavily skewness
+Step_3 & 4: kmeans & DBSCAN algorithm relies on the distance metrics (e.g. euclidean distance, density) hence it is important to center and scale the data
+
+
+```{r}
+product_engineered_tbl <- product_term_feature_tbl %>% 
+  left_join(product_code_tbl) %>% 
+  left_join(product_price_range_tbl) 
+
+skewed_feature_names <- product_engineered_tbl %>% 
+  select(contains("price")) %>%
+  colnames()
+
+# Pre-processing steps for distance-based algorithms 
+recipe_obj <- recipe(stock_code ~ ., product_engineered_tbl) %>% 
+  step_nzv(all_predictors()) %>% 
+  step_YeoJohnson(skewed_feature_names) %>% 
+  step_center(all_numeric()) %>% 
+  step_scale(all_numeric()) %>% 
+  prep()
+
+prep_product_cluster_tbl <- recipe_obj %>% juice() %>% 
+  filter(complete.cases(.)) 
+
+X_train <- prep_product_cluster_tbl %>% select(-stock_code) 
+Y_label <- prep_product_cluster_tbl %>% select(stock_code) 
+```
+
+# Modelling 
+-- Kmeans Clustering 
+-- Skree Plot: To find the optimal k number of clusters
+-- 2-D UMAP: For visualisation puropose  
+
+```{r}
+kmeans_mapper <- function(center = 3) {
+    set.seed(42)
+    X_train %>%
+        kmeans(centers = center, nstart = 20)
+}
+
+centers_tbl <- tibble(centers = 1:20)
+
+k_means_mapped_tbl <- centers_tbl %>% 
+    mutate(k_means = centers %>% map(kmeans_mapper),
+           glance = k_means %>% map(broom::glance))
+```
+
+
+-- Optimal k-cluster ~ 10 
+```{r}
+k_means_mapped_tbl %>% 
+    unnest(glance) %>% 
+    ggplot(aes(x = centers, y = tot.withinss), colour = "#2c3e50") +
+    geom_point(colour = "#2c3e50", size = 3) +
+    geom_line(colour = "#2c3e50", size = 1) +
+    ggrepel::geom_label_repel(aes(label = centers), colour = "#2c3e50", size = 4) +
+    theme_tq()
+```
+
+UMAP
+-- 2-dimensional Visualisation 
+```{r}
+umap_results <- X_train %>% 
+    umap()
+
+umap_results_tbl <- umap_results$layout %>% 
+    as_tibble() %>% 
+    setNames(c("x", "y")) %>% 
+    cbind(X_train)
+```
+
+
+```{r}
+k_means_obj <- k_means_mapped_tbl %>% 
+    filter(centers == 10) %>% 
+    pull(k_means) %>%  pluck(1)
+
+umap_kmeans_results_tbl <- k_means_obj %>% broom::augment(X_train) %>% bind_cols(Y_label) %>% 
+    select(stock_code, .cluster) %>% 
+    bind_cols(umap_results_tbl)
+
+umap_kmeans_results_tbl %>% 
+    ggplot(aes(x, y, colour = .cluster)) +
+    geom_point(alpha = 0.5) +
+    theme_tq() +
+    scale_colour_tq()
+
+```
+
+kmeans Result Output 
+```{r}
+kmeans_10_result_tbl <- umap_kmeans_results_tbl %>% 
+  left_join(products_manual_tbl %>% select(-median_unit_price))
+```
+
+
+
+## 2.2 Holiday Feature Engineering 
+
+```{r}
+train_data_tbl %>% glimpse()
+
+invoice_term_tbl <- train_data_tbl %>% 
+  distinct(invoice_id, stock_code) %>%
+  left_join(
+    # Join back with filtered Term Table
+    products_disctionary_tbl %>% 
+      left_join(
+        terms_frequency_tbl %>% rename(tot_n = n)
+        )
+    ) %>% 
+  filter(terms %in% top_100_terms) %>% 
+  group_by(invoice_id, terms) %>% 
+  mutate(n = sum(n)) %>% 
+  mutate(n_prop = n/tot_n) %>% ungroup() 
+```
+
+```{r}
+train_holiday_tbl  <- train_data_tbl %>% 
+  # full_join Used: 
+  # -- Noticed most of the holiday dates are missing from the original retail data 
+  full_join(
+    country_holiday_tbl %>% 
+      select(-year, -country_abbr),
+    # Joining by Multiple multiple columns 
+    by = c("country"      = "country",
+           "invoice_date" = "ds")
+    ) %>% 
+  # fill missing holiday label 
+  # -- label "upwards" & boundary set to weekly 
+  # -- Remove missing holiday dates to return back to original data
+  mutate(month_date = floor_date(invoice_date, "month")) %>% 
+  group_by(month_date, country) %>% 
+  fill(holiday, .direction = c("up")) %>% 
+  ungroup() %>% 
+  filter(!is.na(customer_id)) %>% 
+  mutate(holiday = case_when(is.na(holiday) ~ "non",
+                             TRUE ~ holiday)) 
+
+train_holiday_tbl %>% glimpse()
+```
+
+
+
+

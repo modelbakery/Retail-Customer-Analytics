@@ -20,14 +20,14 @@ library(fs)
 library(curl) 
 ```
 
-## Load data from URL and retrive 
+# 1. Load Online Retail data from URL and retrive 
 
 ```{r}
-data_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/00502/online_retail_II.xlsx"
+data_retail_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/00502/online_retail_II.xlsx"
 xlsx_datafile     <- "00_data/online_retail_II.xlsx"
 if(!file_exists(xlsx_datafile)) {
     curl_download(
-        data_url,
+        data_retail_url,
         destfile = xlsx_datafile,
         quiet    = FALSE,
         mode     = "wb"
@@ -38,7 +38,7 @@ if(!file_exists(xlsx_datafile)) {
 ```
 
 
-## Format data 
+## 1.1 Format Retail data 
 
 Always check number of sheets & col types 
 
@@ -83,3 +83,23 @@ excel_tbl_unnested <- excel_format_map_tbl %>%
 excel_tbl_unnested %>% write_rds("00_Data/retail_data_tbl.rds")
 ```
 
+
+# 2. Load Country List data from Github URL
+
+```{r}
+data_path <- "https://raw.githubusercontent.com/datasets/country-list/master/data.csv"
+
+country_abbrv_tbl <- read_csv(data_path) %>% 
+  rename(country = Name,
+         country_abbr = Code) %>% 
+  mutate(country = case_when(
+    country_abbr == "IE" ~ "EIRE",
+    country_abbr == "US" ~ "USA",
+    country_abbr == "ZA" ~ "RSA",
+    country_abbr == "KR" ~ "Korea",
+    TRUE ~ country)
+    )
+
+write_rds(country_abbrv_tbl, "00_data/country_list.csv")
+
+```

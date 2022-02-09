@@ -150,3 +150,39 @@ write_rds(retail_transaction_tbl, file = "00_Data/data_wranggled/trans_data/reta
 write_rds(retail_order_tbl, file = "00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
 
 ```
+
+
+# Holiday Data Wrangle 
+
+```{r}
+invoice_country_tbl <- retail_order_tbl %>% 
+  distinct(invoice_date, country)
+
+# Load Holiday Data 
+holidays_tbl <- read_csv("00_Data/holidays.csv") 
+# Load Retrived country list data 
+country_abbrv_tbl <- read_rds("00_Data/country_abbrv_tbl.rds")
+
+# Filter Time Span 
+min_analyse_date <- min(invoice_country_tbl$invoice_date)
+max_analyse_date <- max(invoice_country_tbl$invoice_date)
+
+left_join_tbl <- holidays_tbl %>% 
+  filter(ds >= min_analyse_date & ds <= max_analyse_date)
+
+country_holiday_tbl <- invoice_country_tbl %>% 
+  distinct(country) %>% 
+  left_join(country_abbrv_tbl) %>% 
+  left_join(left_join_tbl, by = c("country_abbr" = "country")) %>% 
+  filter(complete.cases(.)) 
+
+```
+
+# Save Data 
+
+```{r}
+write_rds(country_holiday_tbl, "00_Data/country_holiday_tbl.rds")
+```
+
+
+
