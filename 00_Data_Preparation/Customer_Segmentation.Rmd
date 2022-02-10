@@ -301,16 +301,129 @@ customer_trans_habits_joined_tbl %>% glimpse()
 ```{r}
 
 recipe_spec_customers <- recipe(~., data = customer_trans_habits_joined_tbl) %>% 
-    step_rm(customer_id) %>% 
+    step_rm(customer_id, contains("cal.")) %>% 
     step_nzv(all_predictors()) %>% 
     step_log(all_predictors(), -contains("cat_"), offset = 1) %>% 
-    step_range(all_predictors(), -contains("cat_"), -contains("month_")) %>% 
+    step_range(all_predictors(), -contains("cat_")) %>% 
     prep() 
 
 recipe_spec_customers %>% juice() %>% glimpse()
     
 ```
 
+
+# Customer Clustering 
+Set Up
+-- Train Data Setup
+-- Source Kmeans Function 
+
+```{r}
+source("00_Functions/Visualisation_function/optimal_kmeans_skree_plot")
+
+X_train <- recipe_spec_customers %>% juice() 
+X_label <- customer_trans_habits_joined_tbl %>% select(customer_id)
+```
+
+
+```{r}
+kmeans_mapper <- function(center = 3) {
+    set.seed(41)
+    X_train %>%
+        kmeans(centers = center, nstart = 20)
+}
+
+centers_tbl <- tibble(centers = 1:10)
+
+k_means_mapped_tbl <- centers_tbl %>% 
+    mutate(k_means = centers %>% map(kmeans_mapper),
+           glance = k_means %>% map(broom::glance))
+```
+
+
+### Parameter Selection: Number of K-clustering Selection 
+-- k = 5 centers 
+```{r}
+k_means_mapped_tbl %>% plot_kmeans_skree()
+```
+
+### Visualisation 
+-- 2D-UMAP
+```{r}
+umap_results <- X_train %>% 
+    umap()
+
+umap_results_tbl <- umap_results$layout %>% 
+    as_tibble() %>% 
+    setNames(c("V.P_x", "V.P_y")) %>% 
+    cbind(X_train)
+```
+
+
+```{r}
+k_means_obj <- k_means_mapped_tbl %>% 
+    filter(centers == 5) %>% 
+    pull(k_means) %>%  pluck(1)
+
+umap_kmeans_results_tbl <- k_means_obj %>% 
+    broom::augment(X_train) %>% 
+    bind_cols(X_label) %>% 
+    select(customer_id, .cluster) %>% 
+    bind_cols(umap_results_tbl)
+
+umap_kmeans_results_tbl %>% 
+    ggplot(aes(V.P_x, V.P_y, colour = .cluster)) +
+    geom_point(alpha = 0.5) +
+    theme_tq() +
+    scale_colour_tq()
+```
+
+
+```{r}
+cluster_morphology_cust_purchase_habit_tbl <- umap_kmeans_results_tbl %>% 
+    group_by(.cluster) %>% 
+    summarise_at(vars(frequency:refund.cat_6), .funs = mean)
+```
+
+
+
+```{r}
+cluster_morphology_cust_purchase_habit_tbl %>% 
+    select(
+        # Label 
+        .cluster,
+        # Customer Purchase Behaviour [RFM] components 
+        frequency, median, monetary, first_pur, last_pur,
+        # 
+        contains("cat_"), contains("refund_")
+        ) %>% 
+    plot_facet_radar(colour = .cluster,
+                     .facet_vars = .cluster)
+```
+
+### Intuitive Planning 
+-- What are their Strength and the Weakness?
+-- How they purchase behaviour varies over time?
+-- Are these clustered customers with behaviour the same in the future?
+-- Can we predict their future purchasing behaviour?
+-- How their purchasing behaviour affect the business and what are the criteria quantifiable. 
+-- What are any niche -?
+-- What could be potential customer experience scenario? 
+
+
+
+### Findings:
+--Products 
+* Strong corrleation of P.Cat_5, P.Cat_2, median monetary value -> 
+* 
+```{r}
+cluster_morphology_cust_purchase_habit_tbl %>% 
+    filter(.cluster == 6)
+
+
+product_cluster_tbl %>% 
+    select(.cluster, n_prices, med_price, max_price, range_price)
+    pull(mode_description)
+```
 
 
 ```{r}
@@ -506,8 +619,13 @@ terms_frequency_tbl <- products_disctionary_tbl %>%
 
 terms_frequency_tbl
 ```
-
-
+- Bloomberg 산업위험 
+->>> 자금조달 WACC (weighted average cost of capital): firm's average cost of capital from all sources, including common stock, preferred stock, bonds, and other forms of debt.
+- logical 한 계획 및 회계가치 -> 회계법인 -> 가치 평가! 
+- DCF 방식 -> 5개월 매출 계획 -> 인권비이다 -> 합리적으로 썼는가? -> discount rate으로 (penalty -> 얼만큼 주어야할까?) --> 
+- 1-2 년 후에는 가치가 올라간다! 
+- 구체적 계획 -> 누구랑 MOU 했을까? 
+- Valuation  평가 
 
 #  4. Modelling 
 

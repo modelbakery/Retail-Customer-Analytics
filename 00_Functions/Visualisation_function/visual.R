@@ -231,3 +231,28 @@ plot_cor <- function(data, target, fct_reorder = FALSE, fct_rev = FALSE,
     
 }
 
+
+## Plot Facet Radar Chart -> Visualising Clustered Components 
+plot_facet_radar <- function(.data, colour = NULL,.facet_vars = NULL){
+    
+    colour_expr <- enquo(colour)
+    facet_expr <- enquo(.facet_vars)
+    
+    g <- .data %>% 
+        ggRadar(aes(colour = !! colour_expr), size = 1) + 
+        facet_wrap(vars(!! facet_expr)) +
+        theme_minimal() +
+        scale_colour_viridis_d(begin = 0.25) +
+        scale_fill_viridis_d(begin = 0.25) +
+        labs(title = "Customer Purchase Morphology") +
+        theme(
+            plot.background  = element_rect(fill = "black"),
+            panel.background = element_rect(fill = "black"),
+            legend.position = "none",
+            text = element_text(colour = "white", size = 10),
+            axis.text = element_text(colour = "grey80", size = 10)
+        )
+    
+    return(g)
+}
+

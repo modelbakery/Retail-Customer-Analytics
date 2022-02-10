@@ -57,8 +57,6 @@ retail_order_tbl <-  read_rds("00_Data/data_wranggled/trans_data/retail_order_tb
 
 products_manual_tbl <-  read_rds("00_Data/data_wranggled/product_data/products_manual_tbl.rds")
 
-country_holiday_tbl <- read_rds("00_Data/country_holiday_tbl.rds")
-
 step_2_split_test <- read_rds("00_Data/data_split/step_2_split_test.rds")
 
 step_2_split_train <- read_rds("00_Data/data_split/step_2_split_train.rds")
@@ -67,12 +65,20 @@ step_2_split_train <- read_rds("00_Data/data_split/step_2_split_train.rds")
 
 ```{r}
 train_data_tbl   <- step_2_split_train$train
-train_label_tbl <- step_2_split_train$test
-
+train_label_tbl  <- step_2_split_train$test
 ```
 
 
-# 2. Product (Unsupervised) Clustering 
+# 2. Plan Customer-Product (Unsupervised) Clustering 
+
+__Problems:__
+- Products are highly unique and has no categories 
+- Need categories to learn which customers are similar in *purchasing behaviour* 
+
+__Solution:__
+- Price Feature Engineering will help group products by price categories 
+-  Text Feature Engineering is essential to compare description fields
+- Stock Code Engineering will group products with similar catalogue
 
 __Hypothesis:__
 - Similar Products Embeds Similar Word Token 
@@ -83,55 +89,40 @@ __Algorithm:__
 - Kmeans: Distance-Based Metric Learning 
 - DBSCAN:  Density-Based Metric Learning 
 
-
-# 3. Products Feature Engineering 
-
-__Problems:__
-- Products are highly unique and has no categories 
-- Need categories to learn which customers are similar in purchasing behaviour 
-
-__Solution:__
-- Price Feature Engineering will help group products by price categories 
--  Text Feature Engineering is essential to compare description fields
-- Stock Code Engineering will group products with similar catalogue
+__Evaluation:__
+- Summarise cluster result of its key components + comparative analysis 
+- Perform double-clustering the result with customer purchase behaviour statistics (RFM metric) to evaluate these product category roles. 
 
 
-## Product Rank by purchase frequency 
-- Possible alternatives: 
-    - Rank product by customer retention (monthly)
-    - Rank product by seasonal robustness 
 
+
+# 3. Products Feature Engineering (Extrapolation) 
 
 ## 3.1 Text Feature Engineering
-- Use 'tidytext' to unnest tokens 
-- Stems the tokens using 'hunspell' to return only the root of the word 
+-- Use 'tidytext' to unnest tokens 
+-- Stems the tokens using 'hunspell' to return only the root of the word 
 
 ```{r}
-product_disctionary <- function(data){
-    out_tbl <- data %>% 
-    select(stock_code, description) %>% 
-    unnest_tokens(terms, description, token = "words") %>% 
+products_dictionary_tbl <- products_manual_tbl %>% 
+    select(stock_code, mode_description) %>% 
+    unnest_tokens(terms, mode_description, token = "words") %>% 
     filter(!(nchar(terms) == 1)) %>% 
     mutate(terms = hunspell::hunspell_stem(terms)) %>% 
     unnest(terms) %>% 
     mutate(n = 1)
-    return(out_tbl)
-}
-products_disctionary_tbl <- products_manual_tbl %>%
-    product_disctionary()
 
 ```
 
 
 ### 2.1.1 Term Frequency
 
-- Count Frequency 
-- Remove Stop words (e.g. "of" has no meaning)
-- Remove colour terms(e.g. "pink" has no meanings)
-- Remove terms with numbers (e.g. "130.5cm" has no meaning)
+-- Count Frequency 
+-- Remove Stop words (e.g. "of" has no meaning)
+-- Remove colour terms(e.g. "pink" has no meanings)
+-- Remove terms with numbers (e.g. "130.5cm" has no meaning)
 
 ```{r}
-terms_frequency_tbl <- products_disctionary_tbl %>% 
+terms_frequency_tbl <- products_dictionary_tbl %>% 
     # Remove unnecessary terms 
     anti_join(stop_words, by = c("terms" = "word")) %>% 
     # Remove colour terms 
@@ -150,14 +141,22 @@ terms_frequency_tbl <- products_disctionary_tbl %>%
 
 ### 2.1.2 Term Frequency Visualisation
 
+__Plan:__
+
+- Simplify the algorithm by filtering top frequent terms  
+- Eliminate uninformative descriptive terminology:
+  -- Cumulative Sum (frequency threshold)
+  -- Near Zero Variance (variance threshold) 
+
 ```{r}
-source("00_Data_Understanding/Visualisation_function/visual.R")
+source("00_Functions/Visualisation_function/visual.R")
 ```
 
 
 * Cumulative Plot 
 -- Flexible Filtering: Rank & Filter terms by Cumulative Sum 
 -- Cumulative Sum above 50% -> Relevant Term
+-- Basis on the descending gradient of cumulative sum the threshold is selected 
 
 ```{r}
 rank_term_frequency_tbl <- terms_frequency_tbl %>% 
@@ -184,11 +183,12 @@ terms_frequency_tbl %>%
 
 ### Fiter Term Frequency 
 
-```{r}
-top_100_terms <- terms_frequency_tbl %>% slice(1:100) %>% pull(terms)
 
-product_term_feature_tbl <- products_disctionary_tbl %>% 
-    filter(terms %in% top_100_terms) %>% 
+```{r}
+top_50_terms <- terms_frequency_tbl %>% slice(1:50) %>% pull(terms)
+
+product_term_feature_tbl <- products_dictionary_tbl %>% 
+    filter(terms %in% top_50_terms) %>% 
     pivot_wider(
         names_from = terms,
         values_from = n,
@@ -198,7 +198,14 @@ product_term_feature_tbl <- products_disctionary_tbl %>%
 ```
 
 ### 3.2 Price Feature Engineering 
-- Highly Skewed (damaging for distance based clustering) 
+
+__Problems:__
+- Price Variations
+- Highly Skewed (Critical damage for distance based algorithm) 
+
+__Solution:__
+- Implement Simple Statistics of product's Price Range 
+- Flexible Transformation (Data Pre-processing) -> Box-Cox or Yeo-Johnson
 
 ```{r}
 product_price_range_tbl <- train_data_tbl %>% 
@@ -207,7 +214,7 @@ product_price_range_tbl <- train_data_tbl %>%
     .groups     = "drop",
     n_prices    = n(),
     med_price   = median(unit_price) %>% round(2),
-    mean_price   = median(unit_price) %>% round(2),
+    mean_price  = median(unit_price) %>% round(2),
     min_price   = min(unit_price),
     p25_price   = quantile(unit_price)[2],
     p50_price   = quantile(unit_price)[3],
@@ -220,6 +227,8 @@ product_price_range_tbl <- train_data_tbl %>%
 
 
 ### 3.2 Stock Code Feature Engineering 
+
+A stock code here will not be *stock keeping unit*. Depending on the type of inventory, retails include identifying information for everything from department to style, target customers, rountine, seasonal/occasional etc to identifies a product and helps business to track inventory for retail business. 
 
 ```{r}
 product_code_tbl <- product_term_feature_tbl %>% 
@@ -235,7 +244,7 @@ product_code_tbl <- product_term_feature_tbl %>%
 ```
 
 
-# Engineered Feature Preprocessing 
+# Feature Preprocessing 
 
 Pre-processing steps
 Step_1: Remove near zero variance feature 
@@ -274,9 +283,9 @@ Y_label <- prep_product_cluster_tbl %>% select(stock_code)
 -- 2-D UMAP: For visualisation puropose  
 
 ```{r}
-kmeans_mapper <- function(center = 3) {
+kmeans_mapper <- function(center = 3, data = X_train) {
     set.seed(42)
-    X_train %>%
+    data %>%
         kmeans(centers = center, nstart = 20)
 }
 
@@ -290,13 +299,23 @@ k_means_mapped_tbl <- centers_tbl %>%
 
 -- Optimal k-cluster ~ 10 
 ```{r}
-k_means_mapped_tbl %>% 
+plot_kmeans_skree <- function(kmeans_map_data, .metric = tot.withinss){
+  
+  metric_expr <- enquo(.metric)
+  
+  g <- kmeans_map_data %>% 
     unnest(glance) %>% 
-    ggplot(aes(x = centers, y = tot.withinss), colour = "#2c3e50") +
+    ggplot(aes(x = centers, y = !! metric_expr), colour = "#2c3e50") +
     geom_point(colour = "#2c3e50", size = 3) +
     geom_line(colour = "#2c3e50", size = 1) +
     ggrepel::geom_label_repel(aes(label = centers), colour = "#2c3e50", size = 4) +
     theme_tq()
+  
+  return(g)
+  
+}
+
+k_means_mapped_tbl %>% plot_kmeans_skree()
 ```
 
 UMAP
@@ -331,13 +350,99 @@ umap_kmeans_results_tbl %>%
 
 kmeans Result Output + Save 
 ```{r}
-kmeans_10_result_tbl <- umap_kmeans_results_tbl %>%
-  select(stock_code, .cluster, x, y) %>% 
-  left_join(product_engineered_tbl) %>% 
-  left_join(products_manual_tbl %>% select(-median_unit_price))
+kmeans_fed_terms <- umap_kmeans_results_tbl %>% 
+  select(!contains("price")) %>% 
+  select(!contains("digit")) %>% 
+  select(-.cluster, -x, -y, -stock_code) %>% 
+  colnames()
 
-write_rds(kmeans_10_result_tbl, "00_Data/data_engineered/kmeans_10_result_tbl.rds")
+kmeans_10_result_tbl <- umap_kmeans_results_tbl %>%
+  select(stock_code, .cluster, x, y, -n) %>% 
+  left_join(product_engineered_tbl %>% select(stock_code, kmeans_fed_terms)) %>% 
+  left_join(product_engineered_tbl %>% select(stock_code, contains("price"))) %>% 
+  left_join(product_engineered_tbl %>% select(stock_code, contains("digit"))) %>% 
+  left_join(products_manual_tbl %>% select(-median_unit_price))
 ```
+
+
+```{r}
+product_cluster_tbl <- kmeans_10_result_tbl
+
+product_disctionary <- function(data,
+                                .document = mode_description){
+  document_expr <- enquo(.document)
+  out_tbl <- data %>% 
+      unnest_tokens(terms, !! document_expr, token = "words") %>% 
+  mutate(terms = hunspell::hunspell_stem(terms)) %>% 
+  unnest(terms) %>% 
+  # Remove stop words 
+  anti_join(stop_words, by = c("terms" = "word")) %>% 
+  filter(!terms %in% colours()) %>% 
+  filter(!terms %>% str_detect(pattern = "[0-9]")) %>% 
+  
+  mutate(n = 1)
+  return(out_tbl)
+}
+
+term_freq_by_cluster_tbl <- product_cluster_tbl %>%
+  product_disctionary() %>% 
+  # Group by cluster & select top N terms
+  group_by(.cluster, terms) %>% 
+  summarise(n = sum(n)) %>% 
+  arrange(desc(n), by_group = TRUE) %>% 
+  slice(1:50)
+
+  
+```
+
+
+```{r}
+g <- term_freq_by_cluster_tbl %>% 
+  slice(1:10) %>% 
+  ungroup() %>% 
+  arrange(desc(n)) %>%
+  mutate(terms = terms %>% as_factor %>% fct_reorder(n)) %>% 
+  ggplot(aes(n, terms, colour = .cluster)) +
+  geom_point() +
+  expand_limits(x = 0) +
+  facet_wrap(~.cluster, ncol = 5, scales = "free_y") +
+  theme_tq() +
+  scale_colour_tq() +
+  labs(y = "") +
+  theme(legend.position = "none")
+  
+ggplotly(g)
+```
+
+
+```{r}
+umap_kmeans_results_tbl <- read_rds("00_Data/data_engineered/umap_kmeans_results_tbl.rds")
+```
+
+```{r}
+umap_kmeans_results_tbl %>% 
+  group_by(.cluster) %>% 
+  summarise_at(vars(heart:range_price), .funs = mean) %>% 
+  select(.cluster, heart:candle, med_price, mean_price, max_price, range_price, contains("digit_")) %>% 
+  plot_facet_radar(colour = .cluster, .facet_vars = .cluster)
+  
+```
+
+
+# Save 
+-- kmeans k = 10 (optimal observed by tot.withness) result table
+-- Final Product Cluster Table 
+
+```{r}
+write_rds(umap_kmeans_results_tbl, "00_Data/data_engineered/umap_kmeans_results_tbl.rds")
+
+write_rds(product_cluster_tbl, "00_Data/data_engineered/product_cluster_tbl.rds")
+
+dump("product_disctionary", "00_Functions/Iterative_analysis/product_disctionary.R")
+```
+
+
+
 
 
 

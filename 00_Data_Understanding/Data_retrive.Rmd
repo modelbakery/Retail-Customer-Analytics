@@ -100,6 +100,6 @@ country_abbrv_tbl <- read_csv(data_path) %>%
     TRUE ~ country)
     )
 
-write_rds(country_abbrv_tbl, "00_data/country_list.csv")
+write_rds(country_abbrv_tbl, "00_data/country_abbrv_tbl.rds")
 
 ```

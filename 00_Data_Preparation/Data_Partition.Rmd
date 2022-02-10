@@ -54,8 +54,10 @@ filter_by_cohort_span <- function(data,
     ) %>% 
     pull(customer_id) 
     
-    cohort_selected_tbl <- data %>% 
+    out_tbl <- data %>% 
     filter(customer_id %in% ids_cohort_selected)
+    
+    return(out_tbl)
 }
 
 cohort_selected_tbl <- retail_order_tbl %>%
@@ -152,6 +154,7 @@ step_2_split_test$test %>% glimpse()
 write_rds(step_2_split_train, "00_Data/data_split/step_2_split_train.rds")
 write_rds(step_2_split_test,  "00_Data/data_split/step_2_split_test.rds")
 ```
+
 
 
 ```{r}
