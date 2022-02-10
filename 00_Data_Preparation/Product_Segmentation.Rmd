@@ -329,57 +329,14 @@ umap_kmeans_results_tbl %>%
 
 ```
 
-kmeans Result Output 
+kmeans Result Output + Save 
 ```{r}
-kmeans_10_result_tbl <- umap_kmeans_results_tbl %>% 
+kmeans_10_result_tbl <- umap_kmeans_results_tbl %>%
+  select(stock_code, .cluster, x, y) %>% 
+  left_join(product_engineered_tbl) %>% 
   left_join(products_manual_tbl %>% select(-median_unit_price))
-```
 
-
-
-## 2.2 Holiday Feature Engineering 
-
-```{r}
-train_data_tbl %>% glimpse()
-
-invoice_term_tbl <- train_data_tbl %>% 
-  distinct(invoice_id, stock_code) %>%
-  left_join(
-    # Join back with filtered Term Table
-    products_disctionary_tbl %>% 
-      left_join(
-        terms_frequency_tbl %>% rename(tot_n = n)
-        )
-    ) %>% 
-  filter(terms %in% top_100_terms) %>% 
-  group_by(invoice_id, terms) %>% 
-  mutate(n = sum(n)) %>% 
-  mutate(n_prop = n/tot_n) %>% ungroup() 
-```
-
-```{r}
-train_holiday_tbl  <- train_data_tbl %>% 
-  # full_join Used: 
-  # -- Noticed most of the holiday dates are missing from the original retail data 
-  full_join(
-    country_holiday_tbl %>% 
-      select(-year, -country_abbr),
-    # Joining by Multiple multiple columns 
-    by = c("country"      = "country",
-           "invoice_date" = "ds")
-    ) %>% 
-  # fill missing holiday label 
-  # -- label "upwards" & boundary set to weekly 
-  # -- Remove missing holiday dates to return back to original data
-  mutate(month_date = floor_date(invoice_date, "month")) %>% 
-  group_by(month_date, country) %>% 
-  fill(holiday, .direction = c("up")) %>% 
-  ungroup() %>% 
-  filter(!is.na(customer_id)) %>% 
-  mutate(holiday = case_when(is.na(holiday) ~ "non",
-                             TRUE ~ holiday)) 
-
-train_holiday_tbl %>% glimpse()
+write_rds(kmeans_10_result_tbl, "00_Data/data_engineered/kmeans_10_result_tbl.rds")
 ```
 
 

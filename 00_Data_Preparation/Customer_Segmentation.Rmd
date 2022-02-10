@@ -1,0 +1,549 @@
+---
+title: "Static Customer Segmentation"
+author: "Seung Hyun Sung"
+date: "2/4/2022"
+output: 
+    html_document:
+        theme: flatly
+        toc: true
+        toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    message = FALSE,
+    warning = FALSE)
+```
+
+
+```{r libraries}
+# libraries
+library(knitr)
+library(timetk)
+library(tidytext)
+library(plotly)
+library(ggwordcloud)
+library(ggiraphExtra)
+library(fs)
+library(readr)
+library(tidyverse)
+library(tidymodels)
+library(tidyquant)
+library(recipes)
+library(umap)
+# Python integration 
+library(reticulate)
+```
+
+
+# 1. Set Up 
+-- Data 
+-- Functions 
+-- Plan 
+
+```{r}
+trans_invoice_tbl <- read_rds("00_Data/data_wranggled/trans_data/trans_invoice_tbl.rds")
+
+retail_order_tbl <-  read_rds("00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
+
+products_manual_tbl <-  read_rds("00_Data/data_wranggled/product_data/products_manual_tbl.rds")
+
+product_cluster_tbl <-  read_rds("00_Data/data_engineered/product_cluster_tbl.rds")
+
+step_2_split_test <- read_rds("00_Data/data_split/step_2_split_test.rds")
+
+step_2_split_train <- read_rds("00_Data/data_split/step_2_split_train.rds")
+
+cleaned_retail_tbl <- read_rds("00_Data/cleaned_retail_tbl.rds")
+```
+
+
+```{r}
+source("00_Functions/Visualisation_function/visual.R")
+source("00_Functions/Iterative_analysis/product_disctionary.R")
+```
+
+
+```{r}
+train_data_tbl  <- step_2_split_train$train
+train_label_tbl <- step_2_split_train$test
+```
+
+
+# 2. Customer (Unsupervised) Segmentation - Static (Time Independent) 
+
+__Objectives:__ 
+- Learn & understand customers with similar purchasing behaviour
+- Identify relevant (strong correlated) purchasing behaviour feature for the predictive modelling (90-days window CLV)
+
+<!-- __Hypothesis:__ -->
+<!-- - Similar Products Embeds Similar Word Token -->
+<!-- - Similar Products Have Similar Price Variations -->
+<!-- - Similar Products Have Similar Stock Codes (digits) -->
+
+<!-- __Algorithm:__ -->
+<!-- - Kmeans: Distance-Based Metric Learning -->
+<!-- - DBSCAN:  Density-Based Metric Learning -->
+
+
+__Problems:__
+- The only demographical feature for customer is country 
+- Need for information to learn which customers are similar in purchasing behaviour 
+
+__Solution:__
+- Implement Product Clustered Feature + Abstract Product Engineered Features to compare customer purchasing preferences on its product level
+- Implement Order Cancellation Feature
+- (consideration) Implement Holidays Feature: 
+-- B2C: Despite the data is mainly B2B retailers it may be possible to distinguish B2C customers by measuring the closness to the holiday dats (Christmas, New years, Easter etc) -> Cross-sell, Gift-Box Strategy Source
+-- B2B: By performing time-series forecasting, it might be possible to project how early the product-clustered customeer group stock there ware-house. Potential Risk Hedging + Demand Forecasting Control can be thought here (Not the area of current business objective)
+
+
+## 3 Join Product Cluster Table with Training Data 
+
+```{r}
+transcation_product_cluster_tbl <- train_data_tbl %>% 
+    left_join(
+        product_cluster_tbl %>% 
+            group_by(stock_code) %>% 
+            slice(1) %>% 
+            ungroup()
+    ) %>% 
+    select(customer_id, invoice_id, invoice_date, stock_code, mode_description, .cluster, stock_price, country, cancellation)
+```
+
+
+## 4 Holiday Feature Engineering 
+
+### 4.1 Format Holiday Data  & Merge 
+
+__Problem:__
+Noticed most of the holiday dates are missing from the original retail data 
+
+__Solution:__
+fill missing holiday label 
+-- label "upwards" & boundary set to within the single month
+
+```{r}
+trans_product_cluster_holiday_tbl  <- transcation_product_cluster_tbl %>% 
+  full_join(
+    country_holiday_tbl %>% select(-year, -country_abbr),
+    by = c("country"      = "country",
+           "invoice_date" = "ds")
+    ) %>% 
+  mutate(month_date = floor_date(invoice_date, "month")) %>% 
+  group_by(month_date, country) %>% 
+  fill(holiday, .direction = c("up")) %>% 
+  ungroup() %>% 
+    # Removes NA filled rows (missing holiday dates)
+  filter(!is.na(customer_id)) %>% 
+  mutate(holiday = case_when(is.na(holiday) ~ "non",
+                             TRUE ~ holiday)) 
+
+trans_product_cluster_holiday_tbl %>% glimpse()
+```
+
+
+```{r}
+trans_product_cluster_holiday_tbl 
+```
+
+
+### Characterise Spend Habits
+
+```{r}
+customer_spend_habits <- trans_product_cluster_holiday_tbl %>% 
+    group_by(customer_id, invoice_id) %>% 
+    summarise(order_value = sum(stock_price)) %>% 
+    ungroup() %>% 
+    
+    # Aggregate by Customer ID
+    group_by(customer_id) %>% 
+    summarise(
+        frequency = n(),
+        min       = min(order_value),
+        median    = median(order_value),
+        max       = max(order_value),
+        monetary  = sum(order_value),
+    ) %>% 
+    ungroup()
+
+
+customer_spend_habits %>% glimpse()
+```
+
+
+
+## Characterise Product Categories
+-- How individual customers have spend purchaing product category in proportions. 
+```{r}
+customer_product_habits_tbl <- trans_product_cluster_holiday_tbl %>% 
+    select(customer_id, stock_price, .cluster) %>% 
+    group_by(customer_id, .cluster) %>% 
+    summarise(stock_price = sum(stock_price)) %>% 
+    mutate(prop = stock_price/sum(stock_price)) %>% 
+    ungroup() %>% 
+    select(-stock_price) %>% 
+    pivot_wider(names_from = .cluster,
+                values_from = prop,
+                values_fill = list(prop = 0),
+                names_prefix = "p.cat_")
+
+customer_product_habits_tbl %>% glimpse()
+```
+
+```{r}
+customer_calender.Month_habits_tbl <- trans_product_cluster_holiday_tbl %>%
+    mutate(month = lubridate::month(invoice_date, abbr = TRUE)) %>% 
+    select(customer_id, stock_price, month) %>% 
+    group_by(customer_id, month) %>% 
+    summarise(stock_price = sum(stock_price)) %>% 
+    mutate(prop = stock_price/sum(stock_price)) %>% 
+    ungroup() %>% 
+    select(-stock_price) %>% 
+    pivot_wider(names_from = month,
+                values_from = prop,
+                values_fill = list(prop = 0),
+                names_prefix = "cal.month_") 
+
+customer_calender.Month_habits_tbl %>% glimpse()
+    
+```
+
+
+```{r}
+source("00_Functions/Iterative_analysis/data_partition_time_span_filter.R")
+
+train_cust_id <- trans_product_cluster_holiday_tbl %>% 
+    distinct(customer_id) %>% pull()
+
+TS_filter_cust_cancel_tbl <- cleaned_retail_tbl %>% 
+    filter(cancellation == TRUE) %>% 
+    filter_by_cohort_span() %>% 
+    filter(customer_id %in% train_cust_id) %>% 
+    mutate(stock_price = quantity*unit_price) %>% 
+    split_by_time(.assess_days = "90")
+```
+
+```{r}
+cancellation_product_cluster_tbl <- TS_filter_cust_cancel_tbl$train %>% 
+    left_join(
+        product_cluster_tbl %>% 
+            group_by(stock_code) %>% 
+            slice(1) %>% 
+            ungroup()
+    ) 
+
+customer_refund_freq_behviour_tbl <- cancellation_product_cluster_tbl %>% 
+    group_by(customer_id, invoice_id) %>% 
+    summarise(order_value = sum(stock_price)) %>% 
+    ungroup() %>% 
+    group_by(customer_id) %>% 
+    summarise(
+        refund_frequency = n(),
+        tot_refund_value = sum(order_value)
+    ) %>% 
+    ungroup()
+
+customer_refund_product_freq_behviour_tbl <- cancellation_product_cluster_tbl %>% 
+    select(customer_id, stock_price, .cluster) %>% 
+    left_join(customer_refund_freq_behviour_tbl) %>% 
+    group_by(customer_id, .cluster) %>% 
+    summarise(frequency = sum(refund_frequency)) %>% 
+    mutate(prop = frequency/sum(frequency)) %>% 
+    ungroup() %>% 
+    select(-frequency) %>% 
+    pivot_wider(names_from = .cluster,
+                values_from = prop,
+                values_fill = list(prop = 0),
+                names_prefix = "refund.cat_")
+    
+```
+
+
+## Characterise Recency in Purchase 
+
+```{r}
+analyse_date <- max(trans_product_cluster_holiday_tbl$invoice_date) +1
+
+customer_recency_habits_tbl <- trans_product_cluster_holiday_tbl %>% 
+    count(customer_id, invoice_date) %>% 
+    group_by(customer_id) %>% 
+    summarise(
+        first_pur = (analyse_date -(min(invoice_date)))/ddays(1),
+        last_pur  = (analyse_date -(max(invoice_date)))/ddays(1)
+    )
+
+customer_recency_habits_tbl %>% 
+    glimpse()
+```
+
+
+## Combine All Customer Table
+
+```{r}
+customer_trans_habits_joined_tbl <- transcation_product_cluster_tbl %>% 
+    distinct(customer_id, country) %>% 
+    left_join(customer_spend_habits) %>% 
+    left_join(customer_recency_habits_tbl) %>% 
+    left_join(customer_product_habits_tbl) %>% 
+    left_join(customer_calender.Month_habits_tbl) %>% 
+    left_join(customer_refund_freq_behviour_tbl) %>% 
+    left_join(customer_refund_product_freq_behviour_tbl) %>% 
+    mutate(tot_refund_value = -tot_refund_value) %>% 
+    mutate_all(~replace_na(., 0))
+
+customer_trans_habits_joined_tbl %>% glimpse()
+```
+
+## Data Pre-processing 
+
+```{r}
+
+recipe_spec_customers <- recipe(~., data = customer_trans_habits_joined_tbl) %>% 
+    step_rm(customer_id) %>% 
+    step_nzv(all_predictors()) %>% 
+    step_log(all_predictors(), -contains("cat_"), offset = 1) %>% 
+    step_range(all_predictors(), -contains("cat_"), -contains("month_")) %>% 
+    prep() 
+
+recipe_spec_customers %>% juice() %>% glimpse()
+    
+```
+
+
+
+```{r}
+n <- 10
+
+lollipop_holiday_tbl <- train_holiday_tbl %>% 
+  group_by(holiday) %>% 
+  product_disctionary() %>% ungroup() %>% 
+  filter(terms %in% top_100_terms) %>% 
+  group_by(holiday) %>%
+  count(terms) %>% 
+  rank_cumulative() %>% ungroup() %>% 
+  filter(rank <= n) 
+
+train_holiday_tbl %>% 
+  
+  
+```
+
+```{r}
+analysising_data %>% 
+    distinct(invoice_id, stock_code) %>% 
+    left_join(products_disctionary_tbl) %>% 
+    select(-n, -invoice_id) %>%
+    
+    group_by(stock_code) %>% 
+    mutate(index = row_number()) %>% ungroup() %>% 
+    tidyr::spread(key = index, value = terms) %>% 
+    unite(terms, -invoice_id, -stock_code,-n)
+```
+
+
+```{r}
+train_data_tbl %>% glimpse()
+
+invoice_term_tbl <- train_data_tbl %>% 
+  distinct(invoice_id, stock_code) %>%
+  left_join(
+    # Join back with filtered Term Table
+    products_disctionary_tbl %>% 
+      left_join(
+        terms_frequency_tbl %>% rename(tot_n = n)
+        )
+    ) %>% 
+  filter(terms %in% top_100_terms) %>% 
+  group_by(invoice_id, terms) %>% 
+  mutate(n = sum(n)) %>% 
+  mutate(n_prop = n/tot_n) %>% ungroup() 
+```
+
+
+
+
+
+
+
+
+
+
+## 3.1 Retention Time Feature Engineering 
+-- Seasonality Trend Preserved 
+
+### 3.1.1 Rank Product by Purchase Frequency 
+
+```{r}
+
+rank_product_frequency_tbl <- analysising_data %>% 
+    count(description, stock_code) %>% 
+    arrange(desc(n)) %>% 
+    mutate(
+        pct = n/ sum(n),
+        cumulative_pct = cumsum(pct),
+        priority = ifelse(cumulative_pct <= 0.5, "yes", "no")
+    ) %>% 
+    rowid_to_column(var = "rank") %>% 
+    mutate(label_text = str_glue("Rank: {rank}
+                                 Product: {description}
+                                 Stock Code: {stock_code}
+                                 Count: {n}
+                                 Pct: {scales::percent(pct)}
+                                 cumulative Pct: {scales::percent(cumulative_pct)}"))
+
+
+g <- rank_product_frequency_tbl %>% 
+    slice(1:2000) %>% 
+    ggplot(aes(rank, n, text = label_text)) +
+    geom_point(aes(colour = priority, size = n), alpha = 0.3) +
+    scale_colour_tq() +
+    theme_tq() +
+    theme(legend.direction = "vertical",
+          legend.position = "right") +
+    labs(title = "Item Frequency",
+         subtitle = "Top Items Account for Majority of Purchases")
+
+g %>% ggplotly(tooltip = "text")
+```
+
+
+
+### 3.1.2 Filter Product by Rank - cumulative_pct
+
+```{r}
+filter_freq_item_list <- rank_item_frequency_tbl %>% filter(priority == "yes") %>% pull(stock_code)
+
+product_weekly_users_tbl <- analysising_data %>% 
+    select(invoice_id, invoice_date, stock_code) %>% 
+    filter(stock_code %in% filter_freq_item_list) %>% 
+    mutate(invoice_period = floor_date(invoice_date, "week")) %>% 
+    group_by(invoice_period, stock_code) %>% 
+    summarise(
+        .groups = "drop",
+        frequency = n()
+    ) 
+
+product_retention_tbl <- product_weekly_users_tbl %>% 
+    select(stock_code, invoice_period, frequency) %>% 
+    group_by(stock_code) %>% 
+    mutate(n = sum(frequency),
+           retention    = frequency/n) %>% 
+    ungroup() %>% 
+    select(-frequency)
+
+
+product_retention_time_feature_tbl <- product_retention_tbl %>% 
+    pivot_wider(
+        names_from = invoice_period,
+        values_from = retention,
+        values_fill = list(retention = 0),
+        values_fn = list(retention = sum)
+    ) 
+
+product_retention_time_feature_tbl
+```
+
+
+
+### 3.3 Text Feature Engineering
+- Use 'tidytext' to unnest tokens 
+- Stems the tokens using 'hunspell' to return only the root of the word 
+
+```{r}
+product_disctionary <- function(data){
+    out_tbl <- data %>% 
+    select(stock_code, mode_description) %>% 
+    unnest_tokens(terms, mode_description, token = "words") %>% 
+    filter(!(nchar(terms) == 1)) %>% 
+    mutate(terms = hunspell::hunspell_stem(terms)) %>% 
+    unnest(terms) %>% 
+    mutate(n = 1)
+    return(out_tbl)
+}
+products_disctionary_tbl <- products_manual_tbl %>%
+    product_disctionary()
+
+```
+
+
+```{r}
+analysising_data %>% 
+    distinct(invoice_id, stock_code) %>% 
+    left_join(products_disctionary_tbl) %>% 
+    select(-n, -invoice_id) %>%
+    
+    group_by(stock_code) %>% 
+    mutate(index = row_number()) %>% ungroup() %>% 
+    tidyr::spread(key = index, value = terms) %>% 
+    unite(terms, -invoice_id, -stock_code,-n)
+```
+
+
+
+### 3.3.1 Term Frequency
+
+- count Frequency 
+- Remove Stop words (e.g. "of" has no meaning)
+- Remove colour terms(e.g. "pink" has no meanings)
+- Remove terms with numbers (e.g. "130.5cm" has no meaning)
+
+```{r}
+terms_frequency_tbl <- products_disctionary_tbl %>% 
+    # Remove unnecessary terms 
+    anti_join(stop_words, by = c("terms" = "word")) %>% 
+    # Remove colour terms 
+    filter(!terms %in% colours()) %>% 
+    # Remove terms with numbers 
+    filter(!terms %>% str_detect(pattern = "[0-9]")) %>% 
+    # summarise -0> abstract frequency 
+    group_by(terms) %>% 
+    summarise(
+        n = sum(n)
+    ) %>% 
+    arrange(desc(n))
+
+terms_frequency_tbl
+```
+
+
+
+#  4. Modelling 
+
+## 4.1 Join Products Categorization Data 
+-- 
+
+```{r}
+products_term_joined_tbl <- products_manual_tbl %>% 
+    left_join(product_term_feature_tbl) %>% 
+    drop_na()
+
+products_retention_joined_tbl <- products_manual_tbl %>% 
+    select(-n) %>% 
+    left_join(product_retention_time_feature_tbl, by = "stock_code") %>% 
+    drop_na()
+```
+
+
+##  4.2 Prepare Recipe for Modelling 
+
+```{r}
+recipe_spec_product_term <- recipe(~., data = products_term_joined_tbl) %>% 
+        # Preprocessing steps as follows: 
+    # Remove unnecessary features for clustering 
+    step_rm(stock_code, n, mode_description) %>% 
+    # Apply log transformation on the median_unit_price + 1 (offset) 
+    step_log(median_unit_price, offset = 1) %>% 
+    # scale to the range of [0,1]
+    step_range(median_unit_price) %>% 
+    prep()
+
+recipe_spec_product_retention <- recipe(~., data = products_retention_joined_tbl) %>% 
+    step_rm(stock_code, n, mode_description) %>% 
+    step_log(median_unit_price, offset = 1) %>% 
+    step_range(median_unit_price) %>% 
+    prep()
+
+```
+
