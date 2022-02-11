@@ -32,44 +32,20 @@ function(data, .cumulative_max = 0.5){
 # 1.2. Cumulative Curve Plot 
 # -- Set maxmium slicing index 
 # -- plotly embedded 
-plot_lollipop <-
-function(data, X_var = terms, Y_var = pct, point_size = n,
-                          fct_reorder = FALSE, fct_rev = FALSE, facet_wrap = FALSE){
-    
-    X_expr <- enquo(X_var)
-    Y_expr <- enquo(Y_var)
-    
-    # Factor Ordering 
-    if(fct_reorder){
-        data <- data %>% 
-            mutate(
-                terms = terms %>% as_factor() %>% fct_reorder(!! Y_expr)
-                )
-    }
-    if(fct_rev){
-        data <- data %>% 
-            mutate(
-                terms = terms %>% as_factor() %>% fct_reorder(!! Y_expr)
-                )
-    }
-    
-    point_size_expr <- enquo(point_size)
-    
-    # Geometrics
+plot_rank_cumulative <- function(data, max_slice = 1000){
     g <- data %>% 
-        ggplot(aes(!! X_expr, !! Y_expr)) +
-        geom_segment(aes(xend = !! X_expr, yend = 0), size = 0.5) +
-        geom_point(aes(size = !! point_size_expr)) +
-        coord_flip() +
+        slice(1:max_slice) %>% 
+        ggplot(aes(rank, n, text = label_text)) +
+        geom_point(aes(colour = priority, size = n), alpha = 0.3) +
+        scale_colour_tq() +
         theme_tq() +
-        theme(
-            legend.position = "none",
-            plot.title = element_text(face = "bold"),
-            plot.caption = element_text(face = "bold.italic")
-        )
+        theme(legend.direction = "vertical",
+              legend.position = "right") +
+        labs(title = "Term Frequency")
     
-    return(g)
+    g %>% ggplotly(tooltip = "text")
 }
+
 # 2. Lollipop Plot
 plot_lollipop <-
 function(data, X_var = terms, Y_var = pct, point_size = n,
@@ -244,7 +220,6 @@ plot_facet_radar <- function(.data, colour = NULL,.facet_vars = NULL){
         theme_minimal() +
         scale_colour_viridis_d(begin = 0.25) +
         scale_fill_viridis_d(begin = 0.25) +
-        labs(title = "Customer Purchase Morphology") +
         theme(
             plot.background  = element_rect(fill = "black"),
             panel.background = element_rect(fill = "black"),

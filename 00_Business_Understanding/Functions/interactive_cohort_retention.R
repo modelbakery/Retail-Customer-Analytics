@@ -125,7 +125,7 @@ function(data){
     # Number of K Months
     mutate(k_month = 1:n() -1) %>% ungroup() %>% 
     mutate(cohort_text_year  = cohort_date %>% year(),
-           cohort_text_month = cohort_date %>% ymd() %>% month(label = TRUE),
+           cohort_text_month = cohort_date %>% ymd() %>% months(abbreviate = TRUE),
            cohort_text       = str_c(cohort_text_month, cohort_text_year),
            label_text        = str_glue("Cohort Sales Performance in {cohort_text}:
                                             From the cohort of {total_users} customers, {active_users}, ({retention}%) made purchase in {(cohort_date + months(k_month))}.
@@ -229,7 +229,7 @@ function(data, interactive = TRUE){
   
   plot_data <- data %>% 
     mutate(date_text_year  = invoice_period %>% year(),
-           date_text_month = invoice_period %>% ymd() %>% month(label = TRUE),
+           date_text_month = invoice_period %>% ymd() %>% months(abbreviate = TRUE),
            date_text       = str_c(date_text_month, date_text_year),
            label_text      = str_glue("{date_text}
                                        {cust_status}:{no_customer}")) %>%
@@ -278,7 +278,7 @@ function(data, interactive = TRUE){
                                            "Returning",
                                            "Recovered"))) %>% 
     mutate(date_text_year  = invoice_period %>% year(),
-           date_text_month = invoice_period %>% ymd() %>% month(label = TRUE),
+           date_text_month = invoice_period %>% ymd() %>% months(abbreviate = TRUE),
            date_text       = str_c(date_text_month, date_text_year),
            label_text      = str_glue("{date_text}
                                        {cust_status}:{prop_cust}")) 
@@ -314,7 +314,7 @@ function(data, interactive = TRUE){
       total_spend = sum(invoice_spend),
       avg_spend   = mean(invoice_spend)) %>% 
     mutate(date_text_year  = invoice_period %>% year(),
-           date_text_month = invoice_period %>% ymd() %>% month(label = TRUE),
+           date_text_month = invoice_period %>% ymd() %>% months(abbreviate = TRUE),
            date_text       = str_c(date_text_month, date_text_year),
            label_text      = str_glue("{date_text}
                                      Total Spend: {scales::dollar(total_spend, scale = 1e-3, suffix = 'K')}

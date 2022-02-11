@@ -1,0 +1,379 @@
+---
+title: "Feature Engineering"
+author: "Seung Hyun Sung"
+date: "2/12/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Set Up 
+-- Data 
+-- Train/Val/Test
+-- Functions 
+-- Plan 
+
+
+## Data 
+```{r}
+trans_invoice_tbl <- read_rds("00_Data/data_wranggled/trans_data/trans_invoice_tbl.rds")
+
+retail_order_tbl <-  read_rds("00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
+
+products_manual_tbl <-  read_rds("00_Data/data_wranggled/product_data/products_manual_tbl.rds")
+
+code_bd_kmeans_10_result_tbl <-  read_rds("00_Data/data_engineered/code_bd_kmeans_10_result_tbl.rds")
+
+cleaned_retail_tbl <- read_rds("00_Data/cleaned_retail_tbl.rds")
+```
+
+## Train/Val/Test
+```{r}
+time_split_train <- read_rds("00_Data/data_split/time_split_train.rds")
+time_split_validation <- read_rds("00_Data/data_split/time_split_validation.rds")
+time_split_test <- read_rds("00_Data/data_split/time_split_test.rds")
+```
+
+
+## Functions 
+```{r}
+source("00_Functions/Visualisation_function/visual.R")
+source("00_Functions/Iterative_analysis/product_disctionary.R")
+```
+
+
+```{r}
+product_clutser_tbl <- code_bd_kmeans_10_result_tbl
+
+train_X_tbl <- time_split_train$train
+val_X_tbl <- time_split_validation$train
+test_X_tbl <- time_split_test$train
+```
+
+
+## 3 Join Product Cluster Table with Training Data 
+-- 13% of product is NA_Catagory Product: Product with low matching descriptive Information 
+
+
+```{r}
+analysed_data <- train_X_tbl
+```
+
+
+```{r}
+cust_product_cluster_tbl <- analysed_data %>% 
+    left_join(
+        product_cluster_tbl %>% 
+            group_by(stock_code) %>% 
+            slice(1) %>% 
+            ungroup(),
+        by = "stock_code"
+    ) %>% 
+    select(customer_id, invoice_id, invoice_date, stock_code, description, .cluster, stock_price, country, cancellation)
+```
+
+## 4 Holiday Feature Engineering 
+
+### 4.1 Format Holiday Data  & Merge 
+
+__Problem:__
+Noticed most of the holiday dates are missing from the original retail data 
+
+__Solution:__
+fill missing holiday label 
+-- label "upwards" & boundary set to within the single month
+
+```{r}
+cust_product_cluster_holiday_tbl  <- cust_product_cluster_tbl %>% 
+  full_join(
+    country_holiday_tbl %>% select(-year, -country_abbr),
+    by = c("country"      = "country",
+           "invoice_date" = "ds")
+    ) %>% 
+  mutate(week_date = floor_date(invoice_date, "week")) %>% 
+  group_by(week_date, country) %>% 
+  fill(holiday, .direction = c("up")) %>% 
+  ungroup() %>% 
+  select(-week_date) %>% 
+  # Removes NA filled rows (missing holiday dates)
+  filter(!is.na(customer_id)) %>% 
+  mutate(holiday_week = case_when(is.na(holiday) ~ FALSE,
+                             TRUE ~ TRUE)) 
+
+cust_holiday_freq_tbl <- cust_product_cluster_holiday_tbl %>% 
+    distinct(customer_id, invoice_date, holiday_week) %>% 
+    group_by(customer_id, invoice_date) %>% 
+    summarise(
+        holiday_week_pur  = sum(holiday_week),
+        ) %>% 
+    ungroup() %>% 
+    
+    # Aggregate by Customer ID
+    group_by(customer_id) %>% 
+    summarise(
+        .groups           = "drop",
+        holiday_week_freq = sum(holiday_week_pur)/n_distinct(invoice_date)
+    ) 
+    
+```
+
+### Characterise Spend Habits
+
+```{r}
+customer_spend_habits <- cust_product_cluster_tbl %>% 
+    group_by(customer_id, invoice_id) %>% 
+    summarise(order_value = sum(stock_price)) %>% 
+    ungroup() %>% 
+    
+    # Aggregate by Customer ID
+    group_by(customer_id) %>% 
+    summarise(
+        frequency     = n(),
+        min_spend     = min(order_value),
+        median_spend  = median(order_value),
+        max_spend     = max(order_value),
+        monetary      = sum(order_value),
+    ) %>% 
+    ungroup()
+
+
+customer_spend_habits %>% glimpse()
+```
+
+
+
+## Characterise Product Categories
+-- How individual customers have spend purchaing product category in proportions. 
+```{r}
+customer_product_habits_tbl <- cust_product_cluster_tbl %>% 
+    select(customer_id, stock_price, .cluster) %>% 
+    group_by(customer_id, .cluster) %>% 
+    summarise(stock_price = sum(stock_price)) %>% 
+    mutate(prop = stock_price/sum(stock_price)) %>% 
+    ungroup() %>% 
+    select(-stock_price) %>% 
+    pivot_wider(names_from = .cluster,
+                values_from = prop,
+                values_fill = list(prop = 0),
+                names_prefix = "p.cat_")
+
+customer_product_habits_tbl %>% glimpse()
+```
+
+```{r}
+customer_calender.Month_performance_tbl <- cust_product_cluster_tbl %>%
+    mutate(month = lubridate::month(invoice_date, abbr = TRUE)) %>% 
+    select(customer_id, stock_price, month) %>% 
+    group_by(customer_id, month) %>% 
+    summarise(stock_price = sum(stock_price)) %>% 
+    mutate(prop = stock_price/sum(stock_price)) %>% 
+    ungroup() %>% 
+    select(-stock_price) %>% 
+    pivot_wider(names_from = month,
+                values_from = prop,
+                values_fill = list(prop = 0),
+                names_prefix = "cal.month_") 
+
+customer_calender.Month_performance_tbl %>% glimpse()
+```
+
+
+```{r}
+source("00_Functions/Iterative_analysis/data_partition_time_span_filter.R")
+
+train_cust_id <- cust_product_cluster_tbl %>% 
+    distinct(customer_id) %>% pull()
+
+TS_filter_cust_cancel_tbl <- cleaned_retail_tbl %>% 
+    filter(cancellation == TRUE) %>% 
+    filter_by_cohort_span() %>% 
+    filter(customer_id %in% train_cust_id) %>% 
+    mutate(stock_price = quantity*unit_price) %>% 
+    split_by_time(.assess_days = "90")
+```
+
+```{r}
+cancellation_product_cluster_tbl <- TS_filter_cust_cancel_tbl$train %>% 
+    left_join(
+        product_cluster_tbl %>% 
+            group_by(stock_code) %>% 
+            slice(1) %>% 
+            ungroup()
+    ) 
+
+customer_refund_freq_behviour_tbl <- cancellation_product_cluster_tbl %>% 
+    group_by(customer_id, invoice_id) %>% 
+    summarise(order_value = sum(stock_price)) %>% 
+    ungroup() %>% 
+    group_by(customer_id) %>% 
+    summarise(
+        refund_frequency = n(),
+        tot_refund_value = sum(order_value)
+    ) %>% 
+    ungroup()
+
+customer_refund_product_freq_behviour_tbl <- cancellation_product_cluster_tbl %>% 
+    select(customer_id, stock_price, .cluster) %>% 
+    left_join(customer_refund_freq_behviour_tbl) %>% 
+    group_by(customer_id, .cluster) %>% 
+    summarise(frequency = sum(refund_frequency)) %>% 
+    mutate(prop = frequency/sum(frequency)) %>% 
+    ungroup() %>% 
+    select(-frequency) %>% 
+    pivot_wider(names_from = .cluster,
+                values_from = prop,
+                values_fill = list(prop = 0),
+                names_prefix = "refund.cat_")
+    
+```
+
+
+## Characterise Recency in Purchase 
+
+```{r}
+analyse_date <- max(cust_product_cluster_tbl$invoice_date) +1
+
+customer_recency_habits_tbl <- cust_product_cluster_tbl %>% 
+    count(customer_id, invoice_date) %>% 
+    group_by(customer_id) %>% 
+    summarise(
+        first_pur = (analyse_date -(min(invoice_date)))/ddays(1),
+        recency  = (analyse_date -(max(invoice_date)))/ddays(1)
+    )
+```
+
+
+## Combine All Customer Table
+
+```{r}
+customer_trans_habits_joined_tbl <- cust_product_cluster_tbl %>% 
+    distinct(customer_id, country) %>% 
+    left_join(customer_spend_habits) %>% 
+    left_join(customer_recency_habits_tbl) %>% 
+    left_join(customer_product_habits_tbl) %>% 
+    left_join(customer_calender.Month_performance_tbl) %>% 
+    left_join(customer_refund_freq_behviour_tbl) %>% 
+    left_join(customer_refund_product_freq_behviour_tbl) %>% 
+    left_join(cust_holiday_freq_tbl) %>% 
+    mutate(tot_refund_value = -tot_refund_value) %>% 
+    mutate_all(~replace_na(., 0))
+
+customer_trans_habits_joined_tbl %>% glimpse()
+
+```
+
+
+## Collect Feature Engineered Output 
+```{r}
+engineered_tbl <- customer_trans_habits_joined_tbl
+```
+
+```{r}
+train_engineered_tbl <- engineered_tbl
+```
+
+
+```{r}
+train_engineered_tbl <- read_rds("00_Data/data_engineered/train_engineered_tbl.rds")
+
+validation_engineered_tbl <- read_rds("00_Data/data_engineered/validation_engineered_tbl.rds")
+
+c <- read_rds("00_Data/data_engineered/test_engineered_tbl.rds")
+```
+
+
+```{r}
+time_split_train <- read_rds("00_Data/data_split/time_split_train.rds")
+
+time_split_Validation <- read_rds("00_Data/data_split/time_split_Validation.rds")
+
+time_split_test <- read_rds("00_Data/data_split/time_split_test.rds")
+```
+
+
+```{r}
+analyse_data <- time_split_test$train
+label_data   <- time_split_test$test
+
+engineered_data <- test_engineered_tbl
+```
+
+
+
+```{r}
+cohort_tbl <- analyse_data %>% 
+    group_by(customer_id) %>% 
+    mutate(
+        cohort_date = floor_date(min(invoice_date), "month"),
+        cohort      = cohort_date %>% format("%Y%m")
+        ) %>% 
+    ungroup()
+
+cohort_behaviour_tbl <- cohort_tbl %>% 
+    group_by(cohort, customer_id) %>% 
+    summarise(
+        .groups = "drop",
+        n_items   = n(),
+        monetary  = sum(quantity),
+        frequency = n_distinct(invoice_id)
+        ) %>% 
+    mutate(
+        cohort.items_prop = n_items/sum(n_items),
+        cohort.monetary_prop = n_items/sum(monetary),
+        cohort.frequency_prop = n_items/sum(frequency)
+        ) %>% ungroup()  %>% 
+    select(-n_items, -monetary, -frequency)
+
+cohort_behaviour_tbl %>% glimpse()
+```
+
+
+```{r}
+customer_joined_tbl <- cohort_behaviour_tbl %>% 
+    left_join(engineered_data) %>% 
+    left_join(label_data) %>% 
+    select(spend_90_total, spend_90_flag, customer_id,
+           contains("cohort"),
+           contains("holiday"), everything()) %>% 
+    # mutate(spend_90_total = log(spend_90_total)) %>% 
+    replace_na(
+        replace = list(
+        spend_90_total = 0,
+        spend_90_flag  = 0)
+        ) %>% 
+    mutate(
+        cohort = cohort %>% as.factor(),
+        country = country %>% as.factor(),
+        spend_90_flag = spend_90_flag %>% as.factor()
+        ) 
+
+customer_joined_tbl %>% glimpse()
+```
+
+-- No Data Missingness 
+```{r}
+get_missingness <- function(data){
+    data %>% 
+    map_df(~sum(is.na(.)/length(.))) %>% 
+    gather(key = feature, value = missingness) %>% 
+    arrange(desc(missingness))
+}
+
+customer_joined_tbl %>% get_missingness()
+```
+
+
+```{r}
+test_joined_tbl <- customer_joined_tbl
+```
+
+
+## Save Ready to Model Data  
+
+```{r}
+write_rds(test_joined_tbl, "00_Data/data_engineered/90_days_prediction/test_joined_tbl.rds")
+```
+
+

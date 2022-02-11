@@ -1,0 +1,239 @@
+---
+title: "90 Days Prediction Modelling"
+author: "Seung Hyun Sung"
+date: "2/11/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# SetUp
+-- Engineered Data 
+-- Train/Val/Test Data 
+-- Functions 
+
+```{r}
+train_joined_tbl <- read_rds("00_Data/data_engineered/90_days_prediction/train_joined_tbl.rds")
+
+validation_joined_tbl <- read_rds("00_Data/data_engineered/90_days_prediction/validation_joined_tbl.rds")
+
+test_joined_tbl <- read_rds("00_Data/data_engineered/90_days_prediction/test_joined_tbl.rds")
+```
+
+
+```{r}
+modelling_data <- train_joined_tbl
+
+val_data <- validation_joined_tbl
+```
+
+
+## Recipes --
+
+- Model 1: 90-Day Spend Prediction 
+```{r}
+cust_finanical_feature <- c("frequency", "median_spend", "monetary", "recency", "refund_frequency", "tot_refund_value")
+
+recipe_spend_total <- recipe(spend_90_total ~., data = modelling_data) %>%
+    step_rm(spend_90_flag, customer_id, first_pur, 
+            max_spend, min_spend) %>% 
+    step_dummy(all_nominal()) %>% 
+    step_nzv(all_predictors()) %>% 
+    step_log(all_of(cust_finanical_feature), 
+             spend_90_total, offset = 1) %>% 
+    step_range(all_of(cust_finanical_feature), spend_90_total) 
+
+recipe_spend_total %>% prep() %>% juice() %>% glimpse()
+```
+
+- Model 2: 90-Day Spend Probability 
+```{r}
+recipe_spend_probability <- recipe(spend_90_flag ~., data = modelling_data) %>%
+    step_rm(spend_90_total, customer_id, first_pur, 
+            max_spend, min_spend) %>% 
+    step_dummy(all_nominal(), -spend_90_flag) %>% 
+    step_nzv(all_predictors()) %>% 
+    step_log(all_of(cust_finanical_feature), offset = 1) %>% 
+    step_range(all_of(cust_finanical_feature)) 
+
+
+recipe_spend_probability %>% prep() %>% juice() %>% glimpse()
+```
+
+
+### Models --
+
+- Model 1: 90 Days Spend Prediction 
+```{r}
+glmnet_spec_1 <- linear_reg(
+    penalty = tune(),
+    mixture = tune()
+    ) %>% 
+    set_engine("glmnet")
+
+xgboost_spec_1 <- boost_tree(
+    mode = "regression",
+    trees = 500,
+    learn_rate = tune(),
+    min_n      = tune()
+    ) %>% 
+    set_engine("xgboost")
+
+svm_spec_1 <- svm_rbf(
+    mode = "regression",
+    cost = tune(),
+    rbf_sigma = tune(),
+    margin    = tune()
+    ) %>% 
+    set_engine("kernlab")
+
+linear_spec_1 <- linear_reg(
+    mode = "regression",
+    engine = "lm",
+    penalty = tune(),
+    mixture = tune())
+
+RForest_spec_1 <- rand_forest(
+    mode   = "regression",
+    trees  = 500,
+    mtry   = tune(),
+    min_n  = tune()
+    ) %>% 
+    set_engine("randomForest")
+
+
+
+```
+
+- Model 1: 90 Days Probability Prediction 
+```{r}
+xgboost_spec_2 <- boost_tree(
+    mode = "classification",
+    trees = 500,
+    learn_rate = tune(),
+    min_n = tune()
+    ) %>% 
+    set_engine("xgboost")
+
+svm_spec_2 <- svm_rbf(
+    mode = "classification",
+    cost = tune(),
+    rbf_sigma = tune(),
+    margin = tune()
+    ) %>% 
+    set_engine("kernlab")
+
+logistic_spec_2 <- logistic_reg(
+    mode = "classification",
+    engine = "glm",
+    penalty = tune(),
+    mixture = tune()
+    ) %>% 
+    set_engine("glm")
+    
+RForest_spec_2 <- rand_forest(
+    mode = "classification",
+    trees = 500,
+    mtry = tune(),
+    min_n = tune()
+    ) %>% 
+    set_engine("randomForest")
+
+mlp_spec_2 <- mlp(
+    hidden_units = tune(), 
+    penalty = tune(), 
+    epochs = tune()
+    ) %>% 
+    set_engine("nnet", trace = 0) %>%
+    set_mode("classification")
+
+# crossing(
+#   hidden_units = 1:3,
+#   penalty = c(0.0, 0.1),
+#   epochs = c(100, 200)
+# )
+
+```
+
+### Cross Validation 
+- Resample 
+```{r}
+
+resample <- function(data, .seed = 42, n_fold = 5){
+    set.seed(.seed)
+    resample_spec <- data %>% 
+    vfold_cv(v = n_fold)
+    return(resample_spec)
+}
+
+resample_spec <- val_data %>% 
+    resample(.seed = 42, n_fold = 5)
+
+## -- Model (1): Predict Spend Total
+wflwset_setup_spend <- workflow_set(
+    preproc = list(
+        recipe_spend_total
+        ),
+    models = list(
+        glmnet_spec_1,
+        xgboost_spec_1,
+        svm_spec_1,
+        linear_spec_1,
+        RForest_spec_1
+    ),
+    cross = TRUE
+)
+
+## -- Model (2): Predict Spend Probability
+wflwset_setup_prob <- workflow_set(
+    preproc = list(
+        recipe_spend_probability
+    ),
+    models = list(
+        xgboost_spec_2,
+        svm_spec_2,
+        logistic_spec_2,
+        RForest_spec_2,
+        mlp_spec_2
+    ),
+    cross = TRUE
+)
+```
+
+
+
+```{r}
+### 3.5 Params Tune Results  
+wflwset_tune_result <- wflwset_setup_spend %>% 
+    workflow_map(
+        fn = "tune_race_anova",
+        resamples = resample_spec,
+        grid = 15,
+        metrics = metric_set(rmse, rsq),
+        verbose = TRUE
+    )
+
+wflwset_tune_prob_result <- wflwset_setup_prob %>% 
+    workflow_map(
+        fn = "tune_grid",
+        resamples = resample_spec,
+        grid = 15,
+        metrics = metric_set(accuracy, mse),
+        verbose = TRUE
+    )
+```
+
+
+
+- Bloomberg 산업위험 
+->>> 자금조달 WACC (weighted average cost of capital): firm's average cost of capital from all sources, including common stock, preferred stock, bonds, and other forms of debt.
+- logical 한 계획 및 회계가치 -> 회계법인 -> 가치 평가! 
+- DCF 방식 -> 5개월 매출 계획 -> 인권비이다 -> 합리적으로 썼는가? -> discount rate으로 (penalty -> 얼만큼 주어야할까?) --> 
+- 1-2 년 후에는 가치가 올라간다! 
+- 구체적 계획 -> 누구랑 MOU 했을까? 
+- Valuation  평가 
+
+
+

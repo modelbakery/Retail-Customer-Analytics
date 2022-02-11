@@ -45,10 +45,6 @@ conda create -n py3.8 python=3.8 scikit-learn pandas numpy matplotlib
 
 Replace this with your conda environment containing sklearn, pandas, & numpy
 
-```{r}
-use_condaenv("py3.8", required = TRUE)
-```
-
 
 # 1. Data 
 
@@ -57,15 +53,18 @@ retail_order_tbl <-  read_rds("00_Data/data_wranggled/trans_data/retail_order_tb
 
 products_manual_tbl <-  read_rds("00_Data/data_wranggled/product_data/products_manual_tbl.rds")
 
-step_2_split_test <- read_rds("00_Data/data_split/step_2_split_test.rds")
-
-step_2_split_train <- read_rds("00_Data/data_split/step_2_split_train.rds")
+time_split_train <- read_rds("00_Data/data_split/time_split_train.rds")
 ```
 
 
 ```{r}
-train_data_tbl   <- step_2_split_train$train
-train_label_tbl  <- step_2_split_train$test
+train_X_tbl  <- time_split_train$train
+train_Y_tbl  <- time_split_train$test
+```
+
+
+```{r}
+analyse_tbl <- train_X_tbl
 ```
 
 
@@ -99,6 +98,9 @@ __Evaluation:__
 # 3. Products Feature Engineering (Extrapolation) 
 
 ## 3.1 Text Feature Engineering
+
+### Term Extraction - Unnesting Tokens
+
 -- Use 'tidytext' to unnest tokens 
 -- Stems the tokens using 'hunspell' to return only the root of the word 
 
@@ -114,7 +116,7 @@ products_dictionary_tbl <- products_manual_tbl %>%
 ```
 
 
-### 2.1.1 Term Frequency
+### Term Frequency
 
 -- Count Frequency 
 -- Remove Stop words (e.g. "of" has no meaning)
@@ -139,13 +141,16 @@ terms_frequency_tbl <- products_dictionary_tbl %>%
 ```
 
 
-### 2.1.2 Term Frequency Visualisation
+### Term Frequency Visualisation
 
 __Plan:__
 
 - Simplify the algorithm by filtering top frequent terms  
+
 - Eliminate uninformative descriptive terminology:
+
   -- Cumulative Sum (frequency threshold)
+  
   -- Near Zero Variance (variance threshold) 
 
 ```{r}
@@ -153,9 +158,12 @@ source("00_Functions/Visualisation_function/visual.R")
 ```
 
 
-* Cumulative Plot 
--- Flexible Filtering: Rank & Filter terms by Cumulative Sum 
+Cumulative Plot 
+
+-- Flexible Filtering: Rank & Filter terms by Cumulative Sum
+
 -- Cumulative Sum above 50% -> Relevant Term
+
 -- Basis on the descending gradient of cumulative sum the threshold is selected 
 
 ```{r}
@@ -166,7 +174,7 @@ rank_term_frequency_tbl %>% plot_rank_cumulative(max_slice = 500)
 
 ```
 
-* Word Cloud Plot 
+Word Cloud Plot 
 
 ```{r}
 terms_frequency_tbl %>% 
@@ -181,14 +189,13 @@ terms_frequency_tbl %>%
 ```
 
 
-### Fiter Term Frequency 
-
+Filter Top 100 Term  
 
 ```{r}
-top_50_terms <- terms_frequency_tbl %>% slice(1:50) %>% pull(terms)
+top_100_terms <- terms_frequency_tbl %>% slice(1:100) %>% pull(terms)
 
 product_term_feature_tbl <- products_dictionary_tbl %>% 
-    filter(terms %in% top_50_terms) %>% 
+    filter(terms %in% top_100_terms) %>% 
     pivot_wider(
         names_from = terms,
         values_from = n,
@@ -197,7 +204,8 @@ product_term_feature_tbl <- products_dictionary_tbl %>%
     )
 ```
 
-### 3.2 Price Feature Engineering 
+
+## 3.2 Price Feature Engineering 
 
 __Problems:__
 - Price Variations
@@ -208,7 +216,7 @@ __Solution:__
 - Flexible Transformation (Data Pre-processing) -> Box-Cox or Yeo-Johnson
 
 ```{r}
-product_price_range_tbl <- train_data_tbl %>% 
+product_price_range_tbl <- analyse_tbl %>% 
   group_by(stock_code) %>% 
   summarise(
     .groups     = "drop",
@@ -222,70 +230,86 @@ product_price_range_tbl <- train_data_tbl %>%
     max_price   = max(unit_price),
     range_price = ((max_price - min_price)/ mean_price) %>% round(2)
   ) 
-
 ```
 
 
-### 3.2 Stock Code Feature Engineering 
+## 3.3 Stock Code Feature Engineering 
 
 A stock code here will not be *stock keeping unit*. Depending on the type of inventory, retails include identifying information for everything from department to style, target customers, rountine, seasonal/occasional etc to identifies a product and helps business to track inventory for retail business. 
 
 ```{r}
 product_code_tbl <- product_term_feature_tbl %>% 
   select(stock_code) %>% 
-  mutate(code = str_replace(stock_code, "[a-zA-Z ]", ""))  %>% 
+  tidyr::separate(stock_code, 
+           into = c("digit_code", "string_code"), 
+           sep = "(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])",
+           remove = FALSE
+           ) %>% 
+  mutate(code = str_replace(digit_code, "[a-zA-Z ]", ""))  %>% 
   separate(col = code,
            into = str_c("code_digit_", 6:1),
            sep = "",
-           remove = FALSE) %>% 
-  select(-code_digit_6) %>% 
-  mutate_at(vars(starts_with("code_digit_")), funs(as.numeric)) %>%
-  select(-code) 
+           remove = TRUE) %>% 
+  select(-code_digit_6, -digit_code) %>% 
+  mutate(string_code = replace_na(string_code, 0)) %>% 
+  mutate_at(vars(!starts_with("stock_")), funs(as.factor)) 
 ```
 
 
-# Feature Preprocessing 
+# 4 Feature Preprocessing 
 
-Pre-processing steps
-Step_1: Remove near zero variance feature 
--- This step will remove most of the tokenised term features with its variance below given frequency threshold 
-Step_2: Yeo-Johnson generalised transformation will be operated to numeric price data with heavily skewness
+- Pre-processing steps
+
+Step_1: Remove near zero variance feature.This step will remove most of the tokenised term features with its variance below given frequency threshold 
+
+Step_2: YeoJohnson transformation will be operated to numeric price data with heavily skewness
+
 Step_3 & 4: kmeans & DBSCAN algorithm relies on the distance metrics (e.g. euclidean distance, density) hence it is important to center and scale the data
 
 
 ```{r}
-product_engineered_tbl <- product_term_feature_tbl %>% 
+product_joined_tbl <- product_term_feature_tbl %>% 
   left_join(product_code_tbl) %>% 
-  left_join(product_price_range_tbl) 
-
-skewed_feature_names <- product_engineered_tbl %>% 
-  select(contains("price")) %>%
-  colnames()
+  left_join(product_price_range_tbl) %>% 
+  # Observed that some products are missing from the training data 
+  # New Product!! 
+  filter(complete.cases(.))
 
 # Pre-processing steps for distance-based algorithms 
-recipe_obj <- recipe(stock_code ~ ., product_engineered_tbl) %>% 
+recipe_obj <- recipe(~., product_joined_tbl) %>% 
+  step_rm(stock_code) %>% 
+  step_dummy(all_nominal()) %>% 
   step_nzv(all_predictors()) %>% 
-  step_YeoJohnson(skewed_feature_names) %>% 
-  step_center(all_numeric()) %>% 
-  step_scale(all_numeric()) %>% 
-  prep()
+  step_BoxCox(contains("_price")) %>% 
+  step_range(contains("_price")) %>% 
+  prep() 
 
-prep_product_cluster_tbl <- recipe_obj %>% juice() %>% 
-  filter(complete.cases(.)) 
+prep_product_cluster_tbl <- recipe_obj %>% bake(new_data = product_joined_tbl)
 
-X_train <- prep_product_cluster_tbl %>% select(-stock_code) 
-Y_label <- prep_product_cluster_tbl %>% select(stock_code) 
+X_train <- prep_product_cluster_tbl 
+Y_label <- product_joined_tbl %>% select(stock_code) 
 ```
 
-# Modelling 
+
+# 5 Clustering  
+
 -- Kmeans Clustering 
--- Skree Plot: To find the optimal k number of clusters
+-- Scree Plot: To find the optimal k number of clusters
 -- 2-D UMAP: For visualisation puropose  
 
+
+## 5.1 SetUp
+
 ```{r}
-kmeans_mapper <- function(center = 3, data = X_train) {
+source("00_Functions/Visualisation_function/optimal_kmeans_skree_plot.R")
+source("00_Functions/Iterative_analysis/product_disctionary.R")
+```
+
+
+```{r}
+kmeans_mapper <- function(center = 3) {
     set.seed(42)
-    data %>%
+    X_train %>%
         kmeans(centers = center, nstart = 20)
 }
 
@@ -297,29 +321,18 @@ k_means_mapped_tbl <- centers_tbl %>%
 ```
 
 
--- Optimal k-cluster ~ 10 
-```{r}
-plot_kmeans_skree <- function(kmeans_map_data, .metric = tot.withinss){
-  
-  metric_expr <- enquo(.metric)
-  
-  g <- kmeans_map_data %>% 
-    unnest(glance) %>% 
-    ggplot(aes(x = centers, y = !! metric_expr), colour = "#2c3e50") +
-    geom_point(colour = "#2c3e50", size = 3) +
-    geom_line(colour = "#2c3e50", size = 1) +
-    ggrepel::geom_label_repel(aes(label = centers), colour = "#2c3e50", size = 4) +
-    theme_tq()
-  
-  return(g)
-  
-}
+## 5.2 Parameter Selection: Number of K-clustering Selection 
+-- k = 8 centers 
 
-k_means_mapped_tbl %>% plot_kmeans_skree()
+```{r}
+k_means_mapped_tbl %>% plot_kmeans_scree(.metric = tot.withinss)
 ```
 
-UMAP
--- 2-dimensional Visualisation 
+
+## 5.3 Result Visualisation 
+
+-- UMAP (Dimensional Reduction)
+
 ```{r}
 umap_results <- X_train %>% 
     umap()
@@ -330,11 +343,15 @@ umap_results_tbl <- umap_results$layout %>%
     cbind(X_train)
 ```
 
+-- Mrage (UMAP + Kmeans) Result 
+
+-- Save Result Table 
 
 ```{r}
 k_means_obj <- k_means_mapped_tbl %>% 
-    filter(centers == 10) %>% 
-    pull(k_means) %>%  pluck(1)
+  # Indicate the optimal K selected
+  filter(centers == 8) %>% 
+  pull(k_means) %>%  pluck(1)
 
 umap_kmeans_results_tbl <- k_means_obj %>% broom::augment(X_train) %>% bind_cols(Y_label) %>% 
     select(stock_code, .cluster) %>% 
@@ -345,45 +362,31 @@ umap_kmeans_results_tbl %>%
     geom_point(alpha = 0.5) +
     theme_tq() +
     scale_colour_tq()
-
-```
-
-kmeans Result Output + Save 
-```{r}
-kmeans_fed_terms <- umap_kmeans_results_tbl %>% 
-  select(!contains("price")) %>% 
-  select(!contains("digit")) %>% 
-  select(-.cluster, -x, -y, -stock_code) %>% 
-  colnames()
-
-kmeans_10_result_tbl <- umap_kmeans_results_tbl %>%
-  select(stock_code, .cluster, x, y, -n) %>% 
-  left_join(product_engineered_tbl %>% select(stock_code, kmeans_fed_terms)) %>% 
-  left_join(product_engineered_tbl %>% select(stock_code, contains("price"))) %>% 
-  left_join(product_engineered_tbl %>% select(stock_code, contains("digit"))) %>% 
-  left_join(products_manual_tbl %>% select(-median_unit_price))
 ```
 
 
 ```{r}
-product_cluster_tbl <- kmeans_10_result_tbl
+code_bd_kmeans_10_result_tbl <- umap_kmeans_results_tbl %>%
+  left_join(
+    products_manual_tbl %>% select(-median_unit_price, -n)
+    )
+```
 
-product_disctionary <- function(data,
-                                .document = mode_description){
-  document_expr <- enquo(.document)
-  out_tbl <- data %>% 
-      unnest_tokens(terms, !! document_expr, token = "words") %>% 
-  mutate(terms = hunspell::hunspell_stem(terms)) %>% 
-  unnest(terms) %>% 
-  # Remove stop words 
-  anti_join(stop_words, by = c("terms" = "word")) %>% 
-  filter(!terms %in% colours()) %>% 
-  filter(!terms %>% str_detect(pattern = "[0-9]")) %>% 
-  
-  mutate(n = 1)
-  return(out_tbl)
-}
 
+### Finalise 
+
+```{r}
+product_cluster_tbl <- code_bd_kmeans_10_result_tbl
+```
+
+
+
+# 6 Product Category Evaluation Via Visualisation 
+-- Summarise Clustering Components by Radar Visualisation 
+-- Evaluate Stemming Words of the Clustered Product Groups Using Heat Map 
+
+
+```{r}
 term_freq_by_cluster_tbl <- product_cluster_tbl %>%
   product_disctionary() %>% 
   # Group by cluster & select top N terms
@@ -391,10 +394,7 @@ term_freq_by_cluster_tbl <- product_cluster_tbl %>%
   summarise(n = sum(n)) %>% 
   arrange(desc(n), by_group = TRUE) %>% 
   slice(1:50)
-
-  
 ```
-
 
 ```{r}
 g <- term_freq_by_cluster_tbl %>% 
@@ -405,7 +405,7 @@ g <- term_freq_by_cluster_tbl %>%
   ggplot(aes(n, terms, colour = .cluster)) +
   geom_point() +
   expand_limits(x = 0) +
-  facet_wrap(~.cluster, ncol = 5, scales = "free_y") +
+  facet_wrap(~.cluster, ncol = 2, scales = "free_y") +
   theme_tq() +
   scale_colour_tq() +
   labs(y = "") +
@@ -415,28 +415,13 @@ ggplotly(g)
 ```
 
 
-```{r}
-umap_kmeans_results_tbl <- read_rds("00_Data/data_engineered/umap_kmeans_results_tbl.rds")
-```
-
-```{r}
-umap_kmeans_results_tbl %>% 
-  group_by(.cluster) %>% 
-  summarise_at(vars(heart:range_price), .funs = mean) %>% 
-  select(.cluster, heart:candle, med_price, mean_price, max_price, range_price, contains("digit_")) %>% 
-  plot_facet_radar(colour = .cluster, .facet_vars = .cluster)
-  
-```
-
 
 # Save 
--- kmeans k = 10 (optimal observed by tot.withness) result table
+-- kmeans k = 10 (optimal observed by tot.withinss) result table
 -- Final Product Cluster Table 
 
 ```{r}
-write_rds(umap_kmeans_results_tbl, "00_Data/data_engineered/umap_kmeans_results_tbl.rds")
-
-write_rds(product_cluster_tbl, "00_Data/data_engineered/product_cluster_tbl.rds")
+write_rds(code_bd_kmeans_10_result_tbl, "00_Data/data_engineered/code_bd_kmeans_10_result_tbl.rds")
 
 dump("product_disctionary", "00_Functions/Iterative_analysis/product_disctionary.R")
 ```

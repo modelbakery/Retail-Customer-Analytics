@@ -1,5 +1,6 @@
 product_disctionary <-
-function(data, .document = mode_description){
+function(data,
+                                .document = mode_description){
   document_expr <- enquo(.document)
   out_tbl <- data %>% 
       unnest_tokens(terms, !! document_expr, token = "words") %>% 
