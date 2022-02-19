@@ -1,0 +1,514 @@
+---
+title: "Cohort Analysis"
+author: "Seung Hyun Sung"
+date: "2/4/2022"
+output: 
+    html_document:
+        theme: flatly
+        toc: true
+        toc_depth: 2
+---
+
+```{r}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    eval = TRUE,
+    message = FALSE,
+    warning = FALSE,
+    dpi = 300,
+    fig.align = "center"
+    )
+```
+
+```{r libraries}
+library(tidyverse)
+library(fs)
+library(readr)
+library(stringr)
+library(tidyquant)
+library(glue)
+library(scales)
+library(ggthemes) 
+library(mdthemes) 
+library(gghighlight)
+library(formattable)
+library(ggiraphExtra)
+library(plotly)
+```
+
+```{r}
+source("00_Functions/Visualisation_function/visual.R")
+```
+
+
+# Data
+
+```{r}
+
+time_split_train <- read_rds("00_Data/data_split/time_split_train.rds")
+
+retail_order_tbl <-  read_rds("00_Data/data_wranggled/trans_data/retail_order_tbl.rds")
+
+products_manual_tbl <-  read_rds("00_Data/data_wranggled/product_data/products_manual_tbl.rds")
+
+```
+
+Call Train Data 
+
+```{r}
+retail_order_tbl <- time_split_train$train
+```
+
+
+## Revenue Breakdown 
+
+Revenue = No.Customers * Repurchase Rate * APV 
+
+[1] Grouping Customers to drill down their purchasing behaviour 
+
+[2] Losing customers at higher-priced tiers hurts more than losing them at lower tiers. The Repurchase Rate * APV components attaches a value to the retention rate. 
+
+
+
+The transcations can be traced in three levels: 
+
+[1] Customer invoice transaction behaviour
+
+[2] Customer-level transaction behaviour
+
+[3] Cohort-level transcation behaviour 
+
+```{r}
+# Transaction per Invoice Table 
+trans_invoice_tbl <- retail_order_tbl %>% 
+  filter(!is.na(customer_id)) %>% 
+  group_by(invoice_date, customer_id, invoice_id) %>% 
+  summarise(
+    .groups           = "drop",
+    n_items           = n(),
+    invoice_spend     = sum(stock_price)
+    ) 
+
+# Transaction per Customer Table 
+trans_cust_tbl <- trans_invoice_tbl %>% 
+  group_by(invoice_date, customer_id) %>% 
+    summarise(
+    .groups           = "drop",
+    n_trans           = n(),
+    invoice_spend     = sum(invoice_spend)
+    ) 
+
+
+customer_cohort_tbl <- trans_invoice_tbl %>% 
+  group_by(customer_id) %>% 
+  summarise(cohort_date = floor_date(min(invoice_date), "month")) %>%
+  ungroup() 
+```
+
+
+
+
+## Cohort Analysis 
+
+__Focus:__ Understanding the churn pattern and seasonality of the company with time by the cohort-level. 
+
+[1] Cohort-stacked Revenue & ARPU Chart
+
+[2] Repurchase Rate 
+
+[2] Customer retention Chart 
+
+
+
+
+### Cohort-stacked Monthly Revenue Chart 
+
+
+```{r}
+cohort_monthly_invoice_tbl <- customer_cohort_tbl %>% 
+    left_join(trans_invoice_tbl) %>% 
+    mutate(
+      cohort = cohort_date %>% format("%Y %m"),
+      cohort = as_factor(cohort) %>% fct_reorder(cohort_date),
+      month.invoice_date = floor_date(invoice_date, "month")
+      ) %>% 
+  select(cohort, everything())
+
+
+cohort_purchase_behaviour_tbl <-  cohort_monthly_invoice_tbl %>% 
+    group_by(month.invoice_date, cohort) %>% 
+    summarise(
+        # .groups = "drop",
+        n_cust    = n_distinct(customer_id),
+        n_trans   = n_distinct(invoice_id),
+        n_items   = sum(n_items),
+        med_spend = median(invoice_spend),
+        revenue   = sum(invoice_spend),
+        ARPU      = revenue/n_cust
+    ) %>% 
+    arrange(cohort, month.invoice_date) %>% 
+    # filter(cohort != "2009 12") %>% 
+    mutate(
+      cust.cumsum     = cumsum(n_cust),
+      trans.cumsum    = cumsum(n_trans),
+      items.cumsum    = cumsum(n_items),
+      med_spend.cumsum= cumsum(med_spend),
+      revenue.cumsum  = cumsum(revenue),
+      ARPU.cumsum     = cumsum(ARPU),
+      
+      label_text = str_glue("Cohort: {cohort}
+                                 No. Customers: {n_cust}
+                                 No. Trans: {n_trans}
+                                 Total Send: {scales::dollar(revenue, scale = 1e-3)}k")
+      ) %>% ungroup()
+
+    
+g <- cohort_purchase_behaviour_tbl %>% 
+    ggplot(aes(month.invoice_date, revenue)) +
+    geom_area(aes(fill = cohort),
+              colour = "white", size = 1,
+              position = position_stack(reverse = T)) +
+  geom_point(aes(y = revenue.cumsum, text = label_text, colour = cohort)) +
+  scale_fill_viridis_d() +
+  scale_colour_viridis_d() +
+  scale_y_continuous(lab = scales::dollar_format()) +
+  theme_tq() +
+  theme(legend.position = "none") +
+  labs(title = "") 
+
+g
+
+g  %>% 
+  ggplotly(tooltip = "text")
+```
+
+
+```{r}
+g <- cohort_purchase_behaviour_tbl %>% 
+    ggplot(aes(month.invoice_date, ARPU)) +
+    geom_area(aes(fill = cohort),
+              colour = "white", size = 1,
+              position = position_stack(reverse = T)) +
+  geom_point(aes(y = ARPU.cumsum, text = label_text, colour = cohort)) +
+  scale_fill_viridis_d() +
+  scale_colour_viridis_d() +
+  scale_y_continuous(lab = scales::dollar_format()) +
+  theme_tq() +
+  theme(legend.position = "none") +
+  labs(title = "") 
+
+g
+```
+
+
+
+```{r}
+cohort_purchase_behaviour_tbl %>% 
+  group_by(cohort) %>% 
+  summarise_at(vars(n_cust:ARPU), .funs = mean)
+```
+
+
+
+### Monthly Customer Retention Chart 
+
+-- Identifying leading indicators of customer churn 
+
+```{r}
+cohort_tbl <- cohort_monthly_invoice_tbl %>% 
+  select(cohort, customer_id, cohort_date, month.invoice_date)
+
+benchmark_month_tbl <- cohort_tbl %>% 
+  distinct(month_date = month.invoice_date) %>% 
+  arrange(month_date) %>% 
+  mutate(
+    month = row_number()
+    )
+
+cohort_analysis_tbl <- cohort_tbl %>% 
+  left_join(benchmark_month_tbl, 
+             by = c("cohort_date" = "month_date")) %>% 
+  rename(cohort.month = month) %>% 
+  left_join(benchmark_month_tbl, 
+            by = c("month.invoice_date" = "month_date")) %>% 
+  mutate(duration_month = month - cohort.month) %>% 
+  select(-cohort.month)
+  
+```
+
+
+```{r}
+retention_curve_tbl <- cohort_monthly_invoice_tbl %>% 
+  left_join(cohort_analysis_tbl) %>% 
+  group_by(duration_month, cohort) %>% 
+      summarise(
+        # .groups = "drop",
+        n_cust = n_distinct(customer_id),
+        revenue = sum(invoice_spend)
+    ) %>% 
+  group_by(cohort) %>% 
+  mutate(
+    retention_prop = n_cust/first(n_cust),
+    revenue_prop = revenue/sum(revenue),
+    ) %>% 
+  distinct(duration_month, cohort, retention_prop)
+```
+
+
+### Retention Curve Overview 
+
+-- The average retention rates across all customer follows 'Flattening Curve'. 
+
+-- The plot suggests that 20% of customers who registered (sampled product) found the value in the company and continued to return over time. 
+
+-- Understanding the customer experiencing scenarios and strategies to leverage the point at which it curves needs to be uncovered. 
+
+__Findings:__ The overview of customer retention with no declining curves at the tails appeals to be healthy from the observed trend. The length of 21 months from this customer data is not sufficient enough to draw any suggestion about the positive service development or the network effects. The growth of retention at the end-phase signals exceptional customer experience with propelling inactive users (initial churn) to return during such phase. 
+
+__Problems:__ In order to make the impact on the business with having resource over time in mind. Identifying the cause and lever for short term churn seems vital to reduce the the stats of approx. 80% of acquisite customers churning after their first purchase. 
+
+-- Fine tuning the Market Fit will benefit customer gain at the short-term phase. 
+
+-- The ways to improve short-term churn
+
+[1] Segment customers based on their need: Product has different key features. Segmenting groups of customer with what they are likely to see its core value in different features of products and recommending these products at the initial phase of customer experience will set good activation point of leveraging both the number of monthly users and their retentions. 
+
+[2] Tuning the target customers: In general, early stage churn is a sign to look back on product market-fit. The early churning customers have not had positive experience or value in service, leading to less referrals and branding. 
+
+
+
+```{r}
+retention_curve_tbl %>% 
+  group_by(duration_month) %>% 
+  summarise_at(vars(retention_prop), .funs = mean) %>% 
+  ggplot(aes(x = duration_month)) +
+  geom_line(aes(y = retention_prop), colour = palette_light()[1]) +
+  expand_limits(y = 0) +
+  theme_tq() +
+    labs(
+    title = "Customer Retention Monthly Time Frame",
+    subtitle = "Flattening Retention Curve Observed",
+    captions = "At approx. 0.2% the retention curve flattens",
+    x = "Length of Time (Month) Since Customer Registration",
+    y = "% of Users Returning Monthly"
+  )
+```
+
+
+
+```{r}
+retention_curve_tbl %>% 
+  pivot_wider(names_from = duration_month,
+              values_from = retention_prop) %>% 
+  ungroup() %>% 
+  select(-cohort) %>% 
+  map_df(~mean(., na.rm = TRUE)) %>% 
+  gather(key = months, value = avg_retention) %>% 
+  mutate(months = months %>% as_factor()) %>% 
+  ggplot(aes(months, avg_retention)) +
+  geom_col(fill = palette_light()[1]) +
+  theme_tq()
+```
+
+
+### Retention Curve by Cohorts 
+
+```{r}
+retention_curve_tbl %>% 
+  ggplot(aes(x = duration_month)) +
+  geom_line(aes(y = retention_prop), colour = palette_light()[1]) +
+  facet_wrap(~cohort) +
+  labs(
+    x = "Length of Time (Month) Since Customer Registration",
+    y = "% of Users Returning Monthly"
+  ) +
+  theme_tq() 
+```
+
+
+
+# Cohort Analysis 
+
+```{r}
+source("00_Business_Understanding/Functions/interactive_cohort_retention.R")
+```
+
+
+```{r}
+# Customer retention Heatmap 
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% get_cohort_heatmap() %>% plot_heatmap(measure_var = retention)
+
+# Customer retention trend
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% abstract_by_cohort(cohort_label = all) %>% get_retention_by_status() %>% plot_retention_status()
+
+# Customer retention proportion breakdown 
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% abstract_by_cohort(cohort_label = all) %>% get_retention_by_status() %>% plot_retention_breakdown()
+
+# Periodic Spending trend
+trans_invoice_tbl %>% abstract_by_period(period = month) %>% abstract_by_cohort(cohort_label = all) %>% plot_spending_trend() 
+
+# *Customer* average spending distribution 
+trans_cust_tbl %>% abstract_cust_spend_by_period(month) %>% abstract_by_cohort(cohort_label = all) %>% plot_spending_distribution()
+
+```
+
+```{r}
+code_bd_kmeans_10_result_tbl <- read_rds("00_Data/data_engineered/code_bd_kmeans_10_result_tbl.rds")
+```
+
+
+
+### Different Retention Rates for Customers on Different Plans 
+
+-- What are the products customers purchase at the first visit?
+
+-- Retention by products and its categories 
+
+-- Is it possible to establish customer plans basis on the products and their purchase timeline 
+e.g. B2B/ B2C customers
+
+
+
+
+
+```{r}
+product_cluster_tbl <- code_bd_kmeans_10_result_tbl %>% 
+  select(stock_code, .cluster)
+
+code_bd_kmeans_10_result_tbl %>% 
+  select(stock_code, .cluster, mode_description) %>% 
+  product_disctionary()
+```
+
+```{r}
+retail_order_product_cluster_tbl <- retail_order_tbl %>% 
+  left_join(product_cluster_tbl)
+
+retail_order_product_cluster_tbl %>% 
+  mutate(period_date = floor_date(invoice_date, "month")) %>% 
+  distinct(customer_id, period_date, .cluster) %>% 
+  group_by(customer_id) %>% 
+  mutate(
+    cohort_date = min(period_date),
+    days        = as.month(period_date - first_pur)) %>% 
+  group_by(.cluster, days) %>% 
+  summarise(cust = n_distinct(customer_id)) %>% 
+  filter(days == 0)
+  
+  
+  
+
+
+
+
+```
+
+
+```{r}
+
+retail_order_product_cluster_tbl %>% 
+  # filter(customer_id == "13085") %>% 
+  group_by(invoice_date, description) %>% 
+  summarise(pur = 1) %>% 
+  pivot_wider(names_from = description,
+              names_prefix = "item_",
+              values_from = pur,
+              values_fill = list(pur = 0),
+              values_fn = list(pur = sum)) 
+  
+Test <- retail_order_product_cluster_tbl %>% 
+  # filter(customer_id == "13085") %>% 
+  group_by(invoice_date, description) %>% 
+  summarise(pur = 1) %>% 
+  pivot_wider(names_from = description,
+              names_prefix = "item_",
+              values_from = pur,
+              values_fill = list(pur = 0),
+              values_fn = list(pur = sum)) 
+Test %>% 
+  mutate(Retention_D1 = )
+  group_by(day) %>% 
+  summarise_at(vars(starts_with("item_")), .funs = mean) 
+  mutate(week.invoice_date = floor_date(invoice_date, "week"))
+
+retail_order_product_cluster_tbl %>% 
+  group_by(invoice_date, description) %>% 
+  summarise(
+    cust = n_distinct(customer_id),
+    pur = n_distinct(invoice_id)
+    ) %>% ungroup() %>% 
+  separate()
+  group_by()
+  mutate()
+  
+  pivot_wider(names_from = month.invoice_date,
+              values_from = n,
+              values_fill = list(n = 0),
+              values_fn = list(n = sum))
+
+retail_order_product_cluster_tbl %>% 
+  distinct(description, invoice_date, quantity) %>% 
+  group_by(description) %>% 
+  mutate(n = 1) %>% 
+  pivot_wider(names_from = invoice_date,
+              values_from = quantity,
+              values_fill = list(quantity = 0),
+              values_fn = list(quantity = sum))
+```
+
+
+## Engage Retained Users 
+
+### Product Value Preposition 
+
+
+```{r}
+invoice_product_cluster_tbl <- retail_order_product_cluster_tbl %>% 
+  select(invoice_id, .cluster) %>% 
+  mutate(n = 1) %>% 
+  pivot_wider(names_from = .cluster,
+              names_prefix = "cluster_",
+              values_from = n,
+              values_fill = list(n = 0),
+              values_fn = list(n = sum))
+```
+
+```{r}
+
+retail_order_product_cluster_tbl %>% 
+  distinct(customer_id, invoice_id, invoice_date) %>% 
+  left_join(invoice_product_cluster_tbl)
+
+
+stock_code_vary_id <- retail_order_product_cluster_tbl %>% 
+  distinct(stock_code, quantity, unit_price) %>% 
+  group_by(stock_code) %>% 
+  arrange(desc(stock_code)) %>% 
+  distinct(stock_code, unit_price) %>% 
+  mutate(n = row_number()) %>% ungroup() %>% 
+  filter(n != 1) %>% 
+  pull(stock_code)
+
+retail_order_product_cluster_tbl %>% 
+  distinct(stock_code, quantity, unit_price) %>% 
+  group_by(stock_code) %>% 
+  arrange(desc(stock_code)) %>% 
+  filter(stock_code %in% stock_code_vary_id) %>% 
+  pivot_wider(names_from = quantity,
+              names_prefix = "quantity_",
+              values_from = unit_price,
+              values_fill = list(unit_price = 0),
+              values_fn = list(unit_price = sum))
+
+retail_order_product_cluster_tbl %>% 
+  distinct(stock_code, unit_price)
+
+retail_order_product_cluster_tbl %>% 
+  distinct(stock_code, quantity)
+```
+
+
+
+
+
+

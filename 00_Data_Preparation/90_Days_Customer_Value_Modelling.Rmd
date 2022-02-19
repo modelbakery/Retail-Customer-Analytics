@@ -9,6 +9,23 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r}
+library(fs)
+library(tidyverse)
+library(recipes)
+library(parsnip)
+library(purrr)
+library(furrr)
+library(glue)
+library(tidyquant)
+library(rsample)
+library(rlang) 
+library(textrecipes) 
+library(tidymodels)
+library(finetune)
+```
+
+
 # SetUp
 -- Engineered Data 
 -- Train/Val/Test Data 
@@ -27,6 +44,10 @@ test_joined_tbl <- read_rds("00_Data/data_engineered/90_days_prediction/test_joi
 modelling_data <- train_joined_tbl
 
 val_data <- validation_joined_tbl
+
+test_data <- test_joined_tbl
+
+test_data %>% str()
 ```
 
 
@@ -34,18 +55,20 @@ val_data <- validation_joined_tbl
 
 - Model 1: 90-Day Spend Prediction 
 ```{r}
+source("")
+
 cust_finanical_feature <- c("frequency", "median_spend", "monetary", "recency", "refund_frequency", "tot_refund_value")
 
 recipe_spend_total <- recipe(spend_90_total ~., data = modelling_data) %>%
     step_rm(spend_90_flag, customer_id, first_pur, 
             max_spend, min_spend) %>% 
     step_dummy(all_nominal()) %>% 
-    step_nzv(all_predictors()) %>% 
+    step_zv(all_predictors()) %>% 
     step_log(all_of(cust_finanical_feature), 
-             spend_90_total, offset = 1) %>% 
+             spend_90_total, offset = 1, skip = T) %>% 
     step_range(all_of(cust_finanical_feature), spend_90_total) 
 
-recipe_spend_total %>% prep() %>% juice() %>% glimpse()
+recipe_spend_total %>% prep() %>% juice() 
 ```
 
 - Model 2: 90-Day Spend Probability 
@@ -54,7 +77,7 @@ recipe_spend_probability <- recipe(spend_90_flag ~., data = modelling_data) %>%
     step_rm(spend_90_total, customer_id, first_pur, 
             max_spend, min_spend) %>% 
     step_dummy(all_nominal(), -spend_90_flag) %>% 
-    step_nzv(all_predictors()) %>% 
+    step_zv(all_predictors()) %>% 
     step_log(all_of(cust_finanical_feature), offset = 1) %>% 
     step_range(all_of(cust_finanical_feature)) 
 
@@ -91,9 +114,10 @@ svm_spec_1 <- svm_rbf(
 
 linear_spec_1 <- linear_reg(
     mode = "regression",
-    engine = "lm",
     penalty = tune(),
-    mixture = tune())
+    mixture = tune()
+    ) %>% 
+    set_engine("lm")
 
 RForest_spec_1 <- rand_forest(
     mode   = "regression",
@@ -103,12 +127,27 @@ RForest_spec_1 <- rand_forest(
     ) %>% 
     set_engine("randomForest")
 
+CART_spec_1 <- decision_tree(
+    mode = "regression",
+    tree_depth = tune(),
+    min_n = tune(),
+    cost_complexity = tune()
+    ) %>% 
+    set_engine("rpart")
+
+
 
 
 ```
 
 - Model 1: 90 Days Probability Prediction 
 ```{r}
+knn_model_spec_2 <- nearest_neighbor(
+    neighbors = tune()
+    ) %>% 
+    set_mode("classification") %>% 
+    set_engine("kknn")
+
 xgboost_spec_2 <- boost_tree(
     mode = "classification",
     trees = 500,
@@ -127,7 +166,6 @@ svm_spec_2 <- svm_rbf(
 
 logistic_spec_2 <- logistic_reg(
     mode = "classification",
-    engine = "glm",
     penalty = tune(),
     mixture = tune()
     ) %>% 
@@ -177,11 +215,12 @@ wflwset_setup_spend <- workflow_set(
         recipe_spend_total
         ),
     models = list(
+        # linear_spec_1,
         glmnet_spec_1,
+        CART_spec_1,
+        RForest_spec_1,
         xgboost_spec_1,
-        svm_spec_1,
-        linear_spec_1,
-        RForest_spec_1
+        svm_spec_1
     ),
     cross = TRUE
 )
@@ -192,10 +231,11 @@ wflwset_setup_prob <- workflow_set(
         recipe_spend_probability
     ),
     models = list(
-        xgboost_spec_2,
-        svm_spec_2,
+        knn_model_spec_2,
         logistic_spec_2,
         RForest_spec_2,
+        xgboost_spec_2,
+        svm_spec_2,
         mlp_spec_2
     ),
     cross = TRUE
@@ -211,7 +251,7 @@ wflwset_tune_result <- wflwset_setup_spend %>%
         fn = "tune_race_anova",
         resamples = resample_spec,
         grid = 15,
-        metrics = metric_set(rmse, rsq),
+        metrics = metric_set(mae, rmse, rsq, ccc),
         verbose = TRUE
     )
 
@@ -220,11 +260,106 @@ wflwset_tune_prob_result <- wflwset_setup_prob %>%
         fn = "tune_grid",
         resamples = resample_spec,
         grid = 15,
-        metrics = metric_set(accuracy, mse),
+        metrics = metric_set(
+            accuracy, 
+            sens, # sensitivity
+            spec, # specificity
+            roc_auc, 
+            mn_log_loss),
         verbose = TRUE
     )
 ```
 
+```{r}
+wflwset_tune_result %>% 
+    unnest(info)
+```
+
+
+```{r}
+## -- Model (1): Predict Spend 
+## 4.1 Model Performance 
+autoplot(wflwset_tune_result) +
+    scale_color_tq() +
+    theme_tq()
+
+wflwset_tune_result %>% 
+    rank_results(rank_metric = "rmse") %>% 
+    filter(.metric == "rmse") 
+
+autoplot(wflwset_tune_result, id = "recipe_decision_tree", metric = "rmse")
+
+## 4.2 Get best parameters 
+params_best_model <- wflwset_tune_result %>% 
+    pull_workflow_set_result(id = "recipe_rand_forest") %>% 
+    select_best(metric = "rmse")
+
+wflw_final_fit <- wflwset_tune_result %>% 
+    pull_workflow("recipe_rand_forest") %>% 
+    finalize_workflow(params_best_model) %>% 
+    fit(val_data)
+
+## 4.3 Predictions
+predictions_tbl <- wflw_final_fit %>% 
+    predict(new_data = test_data) %>% 
+    bind_cols(test_data) %>% 
+    select(.pred_class, spend_90_flag, everything())
+
+predictions_tbl %>% 
+    conf_mat(truth = spend_90_flag, .pred_class)
+
+confusionMatrix(predictions_tbl$spend_90_flag, predictions_tbl$.pred_class)
+
+## 4.4 Important features 
+vip::vip(wflw_final_fit$fit$fit$fit)
+importance_tbl <- vip::vi(wflw_final_fit$fit$fit$fit)
+
+```
+
+```{r}
+## -- Model (2): Predict Spend Probability
+## 4.1 Model Performance 
+autoplot(wflwset_tune_prob_result) +
+    scale_color_tq() +
+    theme_tq()
+
+wflwset_tune_prob_result %>% 
+    rank_results(rank_metric = "accuracy") %>% 
+    filter(.metric == "accuracy") 
+
+autoplot(wflwset_tune_prob_result, id = "recipe_rand_forest", metric = "accuracy")
+
+## 4.2 Get best parameters 
+params_best_model <- wflwset_tune_prob_result %>% 
+    pull_workflow_set_result(id = "recipe_rand_forest") %>% 
+    select_best(metric = "accuracy")
+
+wflw_final_fit <- wflwset_tune_prob_result %>% 
+    pull_workflow("recipe_rand_forest") %>% 
+    finalize_workflow(params_best_model) %>% 
+    fit(modelling_data)
+
+test_tbl <- recipe_spend_probability %>% prep() %>% bake(test_data)
+test_data %>% select()
+library(randomForest)
+
+predict.randomForest(wflw_final_fit$fit, new_date(test_data))
+## 4.3 Predictions
+predictions_tbl <- wflw_final_fit %>% 
+    predict(new_data = test_data) %>% 
+    bind_cols(test_data) %>% 
+    select(.pred_class, spend_90_flag, everything())
+
+predictions_tbl %>% 
+    conf_mat(truth = spend_90_flag, .pred_class)
+library(caret)
+confusionMatrix(predictions_tbl$spend_90_flag, predictions_tbl$.pred_class)
+
+## 4.4 Important features 
+vip::vip(wflw_final_fit$fit$fit$fit)
+importance_tbl <- vip::vi(wflw_final_fit$fit$fit$fit)
+
+```
 
 
 - Bloomberg 산업위험 
